@@ -1,0 +1,35 @@
+# 同步数据收集器配置
+
+# 双目相机
+stereo:
+  device: 6
+  width: 3840
+  height: 1080
+  fps: 30
+
+# 单目相机
+mono:
+  device: 4
+  width: 1280
+  height: 1024
+  fps: 30
+
+# 角度编码器
+encoder:
+  port: "/dev/ttyUSB0"
+  baudrate: 115200
+  # 校准配置文件路径（相对于此配置文件）
+  calibration_file: "../config/encoder_config.json"
+
+# 预热和校准
+warmup_time: 1      # 预热时间（秒）
+calib_time: 0.5       # 校准时间（秒）
+
+# 对齐参数
+max_time_diff_ms: 50.0  # 最大时间差（毫秒）
+
+# HDF5 保存参数
+save:
+  output_dir: "./data"
+  jpeg_quality: 85      # JPEG质量 (1-100)
+

@@ -1,0 +1,45 @@
+# DROID-SLAM 子模块（单独仓库管理）
+DROID-SLAM/
+
+# Cursor IDE
+.cursor/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# 虚拟环境
+venv/
+.env/
+.venv/
+
+# 录制数据（太大不上传）
+recordings/
+record/
+
+# 标定数据
+calibration_images/
+
+# 临时文件
+*.tmp
+*.log
+*.swp
+*~
+
+# 测试图像
+stereo_test_*.jpg
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# 系统文件
+.DS_Store
+Thumbs.db

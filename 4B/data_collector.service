@@ -1,0 +1,28 @@
+[Unit]
+Description=GPIO Data Collector Service
+After=multi-user.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 注意：此文件是模板，运行 install_service.sh 会自动生成实际的服务文件
+# 实际的服务文件会替换以下占位符：
+# - %USER% -> 实际用户名
+# - %WORKDIR% -> 实际工作目录
+User=%USER%
+WorkingDirectory=%WORKDIR%
+ExecStart=/usr/bin/python3 %WORKDIR%/gpio_data_collector.py --config %WORKDIR%/../data_coll/config.yaml --keyboard
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/data_collector.log
+StandardError=append:/var/log/data_collector.log
+
+# 环境变量
+Environment="PYTHONUNBUFFERED=1"
+
+# 确保GPIO可访问
+SupplementaryGroups=gpio
+
+[Install]
+WantedBy=multi-user.target
+

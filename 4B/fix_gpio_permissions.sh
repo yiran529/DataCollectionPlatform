@@ -1,0 +1,84 @@
+#!/bin/bash
+# 修复GPIO权限问题
+
+set -e
+
+echo "=================================="
+echo "修复GPIO权限"
+echo "=================================="
+
+# 检查是否为root
+if [ "$EUID" -ne 0 ]; then
+    echo "请使用 sudo 运行此脚本"
+    exit 1
+fi
+
+# 检测当前用户
+if [ -n "$SUDO_USER" ]; then
+    REAL_USER="$SUDO_USER"
+else
+    REAL_USER="$USER"
+fi
+
+echo "用户: $REAL_USER"
+echo ""
+
+# 1. 创建gpio组（如果不存在）
+echo "1. 检查gpio组..."
+if ! getent group gpio > /dev/null 2>&1; then
+    echo "   创建gpio组..."
+    groupadd gpio
+else
+    echo "   gpio组已存在"
+fi
+
+# 2. 添加用户到gpio组
+echo "2. 添加用户到gpio组..."
+usermod -a -G gpio "$REAL_USER"
+echo "   用户 $REAL_USER 已添加到gpio组"
+
+# 3. 设置/dev/gpiomem权限
+echo "3. 设置/dev/gpiomem权限..."
+if [ -e /dev/gpiomem ]; then
+    chown root:gpio /dev/gpiomem
+    chmod 0660 /dev/gpiomem
+    echo "   /dev/gpiomem 权限已设置"
+else
+    echo "   ⚠️ /dev/gpiomem 不存在（可能需要重启后才会出现）"
+fi
+
+# 4. 创建udev规则（持久化权限）
+echo "4. 创建udev规则..."
+cat > /etc/udev/rules.d/99-gpio-permissions.rules <<EOF
+# GPIO权限规则
+SUBSYSTEM=="bcm2835-gpiomem", KERNEL=="gpiomem", GROUP="gpio", MODE="0660"
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
+EOF
+
+echo "   udev规则已创建"
+
+# 5. 重新加载udev规则
+echo "5. 重新加载udev规则..."
+udevadm control --reload-rules
+udevadm trigger
+
+echo ""
+echo "=================================="
+echo "权限修复完成!"
+echo "=================================="
+echo ""
+echo "重要：需要重新登录或重启才能生效！"
+echo ""
+echo "选项1: 重新登录"
+echo "  注销并重新登录"
+echo ""
+echo "选项2: 重启（推荐）"
+echo "  sudo reboot"
+echo ""
+echo "选项3: 临时生效（当前会话）"
+echo "  newgrp gpio"
+echo "  然后测试: sudo python ../tools/gpio_test/test_led_service.py"
+echo ""
+
+
+
