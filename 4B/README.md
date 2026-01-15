@@ -1,10 +1,16 @@
-# 树莓派4B GPIO数据收集控制器
+# GPIO 数据收集控制器
 
 通过GPIO按钮和RGB LED控制数据收集的开始和结束。
+
+**支持平台：**
+- 🥧 树莓派 4B (使用 RPi.GPIO)
+- 🚀 Nvidia Jetson Xavier (使用 Jetson.GPIO)
 
 ## 硬件连接
 
 ### GPIO引脚 (BCM编号)
+
+**注意：** 以下为树莓派的引脚编号。Jetson Xavier 的引脚布局不同，请参考 [Jetson GPIO 文档](https://github.com/NVIDIA/jetson-gpio)。
 
 | 组件 | GPIO | 物理引脚 | 说明 |
 |------|------|----------|------|
@@ -14,7 +20,7 @@
 | LED蓝 | GPIO23 | 16 | 通过电阻接LED蓝色引脚 |
 | GND | - | 6, 9, 14, 20, 25, 30, 34, 39 | 按钮和LED共阴极 |
 
-### 接线图
+### 接线图（树莓派）
 
 ```
 树莓派 GPIO 引脚布局 (从上往下看，USB口朝下)
@@ -30,6 +36,8 @@ LED红 → GPIO22 (15) (16) GPIO23 ← LED蓝
       GPIO10 (17) (18) GPIO24
        ...
 ```
+
+**Jetson Xavier 用户：** 请参考 Jetson 40-pin 扩展接头的引脚定义，使用相同的 BCM 编号。
 
 ### 按钮接线
 ```
@@ -73,8 +81,16 @@ GPIO23 ── 330Ω ── LED蓝色引脚
 ## 安装和使用
 
 ### 1. 安装依赖
+
+**树莓派：**
 ```bash
 pip install RPi.GPIO
+```
+
+**Jetson Xavier：**
+```bash
+# Jetson.GPIO 需要 Python 3.6+ 和 root 权限（或正确的用户组权限）
+pip install Jetson.GPIO
 ```
 
 ### 2. 测试运行

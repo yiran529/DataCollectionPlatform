@@ -9,15 +9,26 @@ import time
 import sys
 import os
 
+# 自动检测平台并导入对应的GPIO库
 try:
-    import RPi.GPIO as GPIO
+    # 优先尝试 Jetson.GPIO（用于 Nvidia Jetson Xavier）
+    import Jetson.GPIO as GPIO
     HAS_GPIO = True
+    PLATFORM = "Jetson"
+    print("✓ 检测到 Jetson 平台")
 except ImportError:
-    HAS_GPIO = False
-    print("⚠️ RPi.GPIO 未安装")
-    print("  安装命令: pip install RPi.GPIO")
-    print("  或者: sudo apt install python3-rpi.gpio")
-    sys.exit(1)
+    try:
+        # 回退到 RPi.GPIO（用于树莓派）
+        import RPi.GPIO as GPIO
+        HAS_GPIO = True
+        PLATFORM = "RaspberryPi"
+        print("✓ 检测到树莓派平台")
+    except ImportError:
+        HAS_GPIO = False
+        print("⚠️ 未检测到 GPIO 库")
+        print("  Jetson Xavier: pip install Jetson.GPIO")
+        print("  树莓派: pip install RPi.GPIO")
+        sys.exit(1)
 
 
 def check_permissions():

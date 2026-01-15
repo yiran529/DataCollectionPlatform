@@ -43,12 +43,25 @@ from typing import List, Optional
 # 添加父目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 自动检测平台并导入对应的GPIO库
+# 支持树莓派（RPi.GPIO）和 Jetson Xavier（Jetson.GPIO）
 try:
-    import RPi.GPIO as GPIO
+    # 优先尝试导入 Jetson.GPIO（用于 Nvidia Jetson 平台）
+    import Jetson.GPIO as GPIO
     HAS_GPIO = True
+    PLATFORM = "Jetson"
+    print("✓ 检测到 Jetson 平台，使用 Jetson.GPIO")
 except ImportError:
-    HAS_GPIO = False
-    print("⚠️ RPi.GPIO 未安装，使用模拟模式")
+    try:
+        # 回退到 RPi.GPIO（用于树莓派平台）
+        import RPi.GPIO as GPIO
+        HAS_GPIO = True
+        PLATFORM = "RaspberryPi"
+        print("✓ 检测到树莓派平台，使用 RPi.GPIO")
+    except ImportError:
+        HAS_GPIO = False
+        PLATFORM = "Simulation"
+        print("⚠️ 未检测到 GPIO 库，使用模拟模式")
 
 try:
     import cv2

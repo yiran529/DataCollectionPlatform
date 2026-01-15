@@ -157,18 +157,33 @@ class CameraReader:
         self.last_ts = 0
         
     def open(self) -> bool:
-        # 使用默认后端（与 aligned_capture.py 相同）
-        self.cap = cv2.VideoCapture(self.device_id)
+        # 检测是否为 Jetson 平台，优先使用 GStreamer 以获得更好的性能
+        use_gstreamer = self._is_jetson_platform()
+        
+        if use_gstreamer:
+            # Jetson 平台：使用 GStreamer 管道实现硬件加速
+            gst_pipeline = (
+                f"v4l2src device=/dev/video{self.device_id} ! "
+                f"image/jpeg,width={self.width},height={self.height},framerate={self.fps}/1 ! "
+                f"jpegdec ! videoconvert ! appsink"
+            )
+            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+            print(f"[{self.name}] 使用 GStreamer 硬件加速（Jetson 优化）")
+        else:
+            # 树莓派或其他平台：使用标准 V4L2
+            self.cap = cv2.VideoCapture(self.device_id)
         
         if not self.cap.isOpened():
             print(f"[{self.name}] 无法打开设备 {self.device_id}")
             return False
         
-        # 设置 MJPG 格式
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        # 非 GStreamer 模式才需要设置参数
+        if not use_gstreamer:
+            # 设置 MJPG 格式
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
         
         # 预热
         for _ in range(10):
@@ -181,6 +196,20 @@ class CameraReader:
         
         print(f"[{self.name}] {self.device_id}: {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         return True
+    
+    def _is_jetson_platform(self) -> bool:
+        """检测是否为 Jetson 平台"""
+        if os.path.exists('/etc/nv_tegra_release'):
+            return True
+        if os.path.exists('/proc/device-tree/model'):
+            try:
+                with open('/proc/device-tree/model', 'r') as f:
+                    model = f.read().lower()
+                    if 'jetson' in model or 'nvidia' in model:
+                        return True
+            except:
+                pass
+        return False
     
     def start(self):
         self.running = True

@@ -2,6 +2,13 @@
 
 一个模块化、可扩展的数据采集平台，支持多种相机和编码器的视频流、位姿（Pose）和角度数据的实时采集与可视化。
 
+**支持平台：**
+- 🥧 树莓派 4B
+- 🚀 Nvidia Jetson Xavier
+- 💻 通用 Linux (Ubuntu 18.04+)
+
+> **Jetson Xavier 用户：** 请查看 [Jetson Xavier 适配指南](./JETSON_XAVIER_GUIDE.md) 了解平台特定的配置和优化。
+
 ## 功能特性
 
 ### 📹 视频流采集
