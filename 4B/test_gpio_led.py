@@ -62,9 +62,18 @@ LED_GREEN = 27  # 物理引脚 13
 LED_BLUE = 23   # 物理引脚 16
 BUTTON = 17     # 物理引脚 11
 
+# 全局标志，确保只初始化一次
+_gpio_initialized = False
+
 
 def setup():
     """初始化GPIO"""
+    global _gpio_initialized
+    
+    # 如果已经初始化过，直接返回
+    if _gpio_initialized:
+        return
+    
     # 检查权限
     has_permission, perm_type = check_permissions()
     if not has_permission:
@@ -94,15 +103,20 @@ def setup():
         GPIO.setup(LED_GREEN, GPIO.OUT)
         GPIO.setup(LED_BLUE, GPIO.OUT)
         
-        # 按钮输入（内部上拉）
-        # GPIO.setup(BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        # 按钮输入（内部上拉） - 确保设置成功
+        GPIO.setup(BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         
         # 初始全灭
         GPIO.output(LED_RED, False)
         GPIO.output(LED_GREEN, False)
         GPIO.output(LED_BLUE, False)
         
+        # 设置初始化标志
+        _gpio_initialized = True
+        
         print("✓ GPIO初始化成功")
+        print(f"  平台: {PLATFORM}")
+        print(f"  按钮引脚: GPIO{BUTTON} 已配置为输入模式（上拉）")
         
     except RuntimeError as e:
         if "No access to /dev/mem" in str(e) or "try running as root" in str(e).lower():
@@ -124,6 +138,20 @@ def setup():
             sys.exit(1)
         else:
             raise
+    except Exception as e:
+        print(f"❌ GPIO初始化失败: {e}")
+        raise
+
+
+def ensure_button_setup():
+    """确保按钮引脚已正确设置（用于按钮测试前调用）"""
+    try:
+        # 尝试读取一次，如果失败说明未设置
+        _ = GPIO.input(BUTTON)
+    except:
+        # 如果读取失败，重新设置按钮引脚
+        print("  重新配置按钮引脚...")
+        GPIO.setup(BUTTON, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 
 def test_led_individual():
@@ -210,6 +238,22 @@ def test_button():
     print("测试4: 按钮测试")
     print("=" * 40)
     print(f"按钮引脚: GPIO{BUTTON} (物理引脚11)")
+    
+    # 确保按钮引脚已正确设置
+    ensure_button_setup()
+    
+    # 先测试能否读取按钮状态
+    try:
+        initial_state = GPIO.input(BUTTON)
+        state_name = "HIGH (松开)" if initial_state == GPIO.HIGH else "LOW (按下)"
+        print(f"  当前按钮状态: {state_name}")
+    except Exception as e:
+        print(f"❌ 无法读取按钮状态: {e}")
+        print("  请检查:")
+        print("  1. 按钮是否正确连接到GPIO17（物理引脚11）")
+        print("  2. 是否使用了正确的接线方式")
+        return
+    
     print("请按下按钮5次，每次按下LED会变色...")
     print("(按 Ctrl+C 跳过)\n")
     
@@ -245,6 +289,8 @@ def test_button():
         
     except KeyboardInterrupt:
         print("\n跳过按钮测试")
+    except Exception as e:
+        print(f"\n❌ 按钮测试出错: {e}")
 
 
 def test_button_continuous():
@@ -253,6 +299,9 @@ def test_button_continuous():
     print("测试5: 按钮状态监测")
     print("=" * 40)
     print("持续显示按钮状态，按 Ctrl+C 退出\n")
+    
+    # 确保按钮引脚已正确设置
+    ensure_button_setup()
     
     try:
         while True:
@@ -265,6 +314,8 @@ def test_button_continuous():
     except KeyboardInterrupt:
         GPIO.output(LED_GREEN, False)
         print("\n\n✓ 监测结束")
+    except Exception as e:
+        print(f"\n❌ 监测出错: {e}")
 
 
 def main():
@@ -320,10 +371,13 @@ def main():
         print("\n中断")
     
     finally:
+        # 清理LED状态
         GPIO.output(LED_RED, False)
         GPIO.output(LED_GREEN, False)
         GPIO.output(LED_BLUE, False)
-        GPIO.cleanup()
+        # 注意：不要调用 GPIO.cleanup()，因为这会取消所有引脚的设置
+        # 如果需要完全清理，取消下面的注释
+        # GPIO.cleanup()
         print("\nGPIO 已清理，程序退出")
 
 
