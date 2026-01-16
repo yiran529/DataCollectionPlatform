@@ -61,6 +61,10 @@ def check_permissions():
 
 # 按钮引脚配置
 BUTTON_PIN = 4  # BCM编号，物理引脚7
+# 默认使用上拉，按钮按下时将 OUT 拉低（多数三引脚按钮模块是开漏/集电极开路输出）
+PULL_MODE = GPIO.PUD_UP
+PRESSED_LEVEL = GPIO.LOW
+RELEASED_LEVEL = GPIO.HIGH
 
 
 def setup():
@@ -86,13 +90,16 @@ def setup():
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
         
-        # 按钮输入（内部下拉）
-        # 三引脚按钮模块：松开时OUT输出LOW，按下时OUT输出HIGH
-        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        # 按钮输入（内部上拉）
+        # 大多数三引脚按钮模块的 OUT 是开漏/开集输出：
+        #   松开 → 高阻，需要上拉为 HIGH
+        #   按下 → 晶体管导通，将 OUT 拉到 GND（LOW）
+        GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=PULL_MODE)
         
         print("✓ GPIO初始化成功")
         print(f"  按钮引脚: GPIO{BUTTON_PIN} (物理引脚7)")
         print(f"  接线: VCC→3.3V(引脚1), GND→GND(引脚6), OUT→GPIO{BUTTON_PIN}(引脚7)")
+        print("  逻辑: 松开=HIGH, 按下=LOW (上拉)")
         
     except RuntimeError as e:
         if "No access to /dev/mem" in str(e) or "try running as root" in str(e).lower():
@@ -127,18 +134,18 @@ def test_button_basic():
         release_count = 0
         
         print("开始监测按钮状态...")
-        print("(松开=LOW, 按下=HIGH)\n")
+        print("(松开=HIGH, 按下=LOW)\n")
         
         while True:
             current_state = GPIO.input(BUTTON_PIN)
             
             if current_state != last_state:
-                if current_state == GPIO.HIGH:
+                if current_state == PRESSED_LEVEL:
                     press_count += 1
-                    print(f"  [{press_count}] 按钮按下 (HIGH)")
+                    print(f"  [{press_count}] 按钮按下 (LOW)")
                 else:
                     release_count += 1
-                    print(f"  [{release_count}] 按钮松开 (LOW)")
+                    print(f"  [{release_count}] 按钮松开 (HIGH)")
                 
                 last_state = current_state
             
@@ -161,15 +168,15 @@ def test_button_press_count():
     
     try:
         press_count = 0
-        last_state = GPIO.LOW
+        last_state = RELEASED_LEVEL
         
         print("等待按钮按下...")
         
         while press_count < 10:
             current_state = GPIO.input(BUTTON_PIN)
             
-            # 检测上升沿（从LOW到HIGH，表示按下）
-            if last_state == GPIO.LOW and current_state == GPIO.HIGH:
+            # 检测下降沿（从HIGH到LOW，表示按下）
+            if last_state == RELEASED_LEVEL and current_state == PRESSED_LEVEL:
                 press_count += 1
                 print(f"  按下 #{press_count}/10")
                 time.sleep(0.2)  # 防抖
@@ -192,7 +199,7 @@ def test_button_response_time():
     print("按 Ctrl+C 退出测试\n")
     
     try:
-        last_state = GPIO.LOW
+        last_state = RELEASED_LEVEL
         press_times = []
         release_times = []
         
@@ -202,8 +209,8 @@ def test_button_response_time():
             current_state = GPIO.input(BUTTON_PIN)
             current_time = time.time()
             
-            # 检测上升沿（按下）
-            if last_state == GPIO.LOW and current_state == GPIO.HIGH:
+            # 检测下降沿（按下）
+            if last_state == RELEASED_LEVEL and current_state == PRESSED_LEVEL:
                 press_times.append(current_time)
                 if len(press_times) > 1:
                     interval = current_time - press_times[-2]
@@ -211,8 +218,8 @@ def test_button_response_time():
                 else:
                     print(f"  按下 #1")
             
-            # 检测下降沿（松开）
-            elif last_state == GPIO.HIGH and current_state == GPIO.LOW:
+            # 检测上升沿（松开）
+            elif last_state == PRESSED_LEVEL and current_state == RELEASED_LEVEL:
                 release_times.append(current_time)
                 if len(release_times) > 0 and len(press_times) > 0:
                     hold_time = current_time - press_times[-1]
@@ -241,7 +248,7 @@ def test_button_continuous_monitor():
     try:
         while True:
             state = GPIO.input(BUTTON_PIN)
-            status = "按下 (HIGH)" if state == GPIO.HIGH else "松开 (LOW)"
+            status = "按下 (LOW)" if state == PRESSED_LEVEL else "松开 (HIGH)"
             timestamp = time.strftime("%H:%M:%S", time.localtime())
             
             print(f"\r[{timestamp}] 按钮状态: {status}   ", end="", flush=True)
@@ -262,9 +269,9 @@ def main():
   OUT → GPIO{BUTTON_PIN} (物理引脚7)
 
 工作原理:
-  - 松开时: OUT输出LOW (低电平)
-  - 按下时: OUT输出HIGH (高电平)
-  - GPIO配置: 内部下拉 (PUD_DOWN)
+    - 松开时: OUT高阻 → 通过上拉为 HIGH
+    - 按下时: OUT被拉到 GND → LOW
+    - GPIO配置: 内部上拉 (PUD_UP)
 """)
     
     setup()
