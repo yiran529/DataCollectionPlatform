@@ -176,7 +176,8 @@ class CameraReader:
             print(f"[{self.name}] 使用标准 V4L2 模式")
         
         if not self.cap.isOpened():
-            print(f"[{self.name}] 无法打开设备 {self.device_id}")
+            print(f"[{self.name}] ❌ 无法打开设备 /dev/video{self.device_id}")
+            print(f"[{self.name}] 可能原因：设备被占用、不存在或权限不足")
             return False
         
         # 非 GStreamer 模式才需要设置参数
@@ -187,9 +188,14 @@ class CameraReader:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             self.cap.set(cv2.CAP_PROP_FPS, self.fps)
         
-        # 预热
-        for _ in range(10):
-            self.cap.read()
+        # 预热（增加容错性）
+        try:
+            for i in range(10):
+                ret = self.cap.read()
+                if not ret and i == 0:
+                    print(f"[{self.name}] ⚠️ 预热时无法读取帧（设备可能需要更长初始化时间）")
+        except Exception as e:
+            print(f"[{self.name}] ⚠️ 预热异常: {e}")
         
         # 检查实际参数
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
