@@ -210,7 +210,16 @@ class CameraReader:
         if not use_gstreamer:
             try:
                 # v4l2-ctl 已经配置了相机格式和帧率
-                # OpenCV 的 set() 方法会重置相机配置，所以这里只读取不设置
+                # 但需要丢弃几帧让驱动重新协商格式
+                print(f"[{self.name}] 丢弃初始帧以同步配置...", end='', flush=True)
+                for _ in range(5):
+                    ret, _ = self.cap.read()
+                    if not ret:
+                        break
+                    time.sleep(0.05)
+                print(" ✓")
+                
+                # 现在读取正确的参数
                 actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
