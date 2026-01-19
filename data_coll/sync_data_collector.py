@@ -172,10 +172,9 @@ class CameraReader:
             print(f"[{self.name}] 使用 GStreamer 硬件加速（Jetson 优化）")
         else:
             # 树莓派或其他平台：使用标准 V4L2（强制使用 V4L2 后端，避免 GStreamer）
-            # 首先用 v4l2-ctl 配置相机参数（OpenCV 的 set 方法不总是有效）
+            # 首先用 v4l2-ctl 配置相机参数
             import subprocess
             try:
-                # Python 3.6 兼容性：用 stdout/stderr 代替 capture_output
                 # 设置 MJPG 格式以获得更高帧率
                 subprocess.run(
                     ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', 
@@ -187,14 +186,28 @@ class CameraReader:
                     ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', '-p', str(int(self.fps))],
                     check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
-                print(f"[{self.name}] ✓ v4l2-ctl 配置: {self.width}x{self.height} @ {self.fps}fps MJPG")
             except Exception as e:
-                print(f"[{self.name}] ⚠️ v4l2-ctl 配置失败（可能未安装）: {e}")
+                print(f"[{self.name}] ⚠️ v4l2-ctl 初始配置失败: {e}")
             
             print(f"[{self.name}] 打开设备 /dev/video{self.device_id}...", end='', flush=True)
             self.cap = cv2.VideoCapture(self.device_id, cv2.CAP_V4L2)
             print(" ✓")
             print(f"[{self.name}] 使用标准 V4L2 模式（强制 V4L2 后端）")
+            
+            # OpenCV 打开时会重置驱动配置，所以需要再配置一次
+            try:
+                subprocess.run(
+                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', 
+                     '--set-fmt-video', f'width={self.width},height={self.height},pixelformat=MJPG'],
+                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                subprocess.run(
+                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', '-p', str(int(self.fps))],
+                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                print(f"[{self.name}] ✓ v4l2-ctl 重新配置: {self.width}x{self.height} @ {self.fps}fps MJPG")
+            except Exception as e:
+                print(f"[{self.name}] ⚠️ v4l2-ctl 重新配置失败: {e}")
         
         # 等待设备完全初始化
         time.sleep(0.2)
@@ -210,21 +223,11 @@ class CameraReader:
         if not use_gstreamer:
             try:
                 # v4l2-ctl 已经配置了相机格式和帧率
-                # 但需要丢弃几帧让驱动重新协商格式
-                print(f"[{self.name}] 丢弃初始帧以同步配置...", end='', flush=True)
-                for _ in range(5):
-                    ret, _ = self.cap.read()
-                    if not ret:
-                        break
-                    time.sleep(0.05)
-                print(" ✓")
-                
-                # 现在读取正确的参数
                 actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 
-                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (v4l2-ctl 预配置)")
+                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps")
                 
             except Exception as e:
                 print(f"[{self.name}] ⚠️ 参数读取异常: {e}")
