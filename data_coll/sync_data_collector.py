@@ -172,6 +172,24 @@ class CameraReader:
             print(f"[{self.name}] 使用 GStreamer 硬件加速（Jetson 优化）")
         else:
             # 树莓派或其他平台：使用标准 V4L2（强制使用 V4L2 后端，避免 GStreamer）
+            # 首先用 v4l2-ctl 配置相机参数（OpenCV 的 set 方法不总是有效）
+            import subprocess
+            try:
+                # 设置 MJPG 格式以获得更高帧率
+                subprocess.run(
+                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', 
+                     '--set-fmt-video', f'width={self.width},height={self.height},pixelformat=MJPG'],
+                    check=False, capture_output=True
+                )
+                # 设置帧率
+                subprocess.run(
+                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', '-p', str(int(self.fps))],
+                    check=False, capture_output=True
+                )
+                print(f"[{self.name}] v4l2-ctl 配置: {self.width}x{self.height} @ {self.fps}fps MJPG")
+            except Exception as e:
+                print(f"[{self.name}] ⚠️ v4l2-ctl 配置失败（可能未安装）: {e}")
+            
             print(f"[{self.name}] 打开设备 /dev/video{self.device_id}...", end='', flush=True)
             self.cap = cv2.VideoCapture(self.device_id, cv2.CAP_V4L2)
             print(" ✓")
@@ -190,24 +208,16 @@ class CameraReader:
         # 非 GStreamer 模式才需要设置参数
         if not use_gstreamer:
             try:
-                # 设置分辨率和帧率（不设置 FOURCC，避免触发 GStreamer）
-                # V4L2 会根据配置自动协商格式（MJPG 支持更高帧率）
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-                
-                # 禁用自动曝光和自动白平衡以提高稳定性
-                self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-                
-                # 验证设置
+                # v4l2-ctl 已经配置了相机格式和帧率
+                # 这里只需读取相机的实际参数
                 actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 
-                print(f"[{self.name}] ✓ 参数设置: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (V4L2 自动格式协商)")
+                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (MJPG 通过 v4l2-ctl 配置)")
                 
             except Exception as e:
-                print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
+                print(f"[{self.name}] ⚠️ 参数读取异常: {e}")
                 return False
         
         # 等待参数生效
