@@ -171,11 +171,11 @@ class CameraReader:
             self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
             print(f"[{self.name}] 使用 GStreamer 硬件加速（Jetson 优化）")
         else:
-            # 树莓派或其他平台：使用标准 V4L2
+            # 树莓派或其他平台：使用标准 V4L2（强制使用 V4L2 后端，避免 GStreamer）
             print(f"[{self.name}] 打开设备 /dev/video{self.device_id}...", end='', flush=True)
-            self.cap = cv2.VideoCapture(self.device_id)
+            self.cap = cv2.VideoCapture(self.device_id, cv2.CAP_V4L2)
             print(" ✓")
-            print(f"[{self.name}] 使用标准 V4L2 模式")
+            print(f"[{self.name}] 使用标准 V4L2 模式（强制 V4L2 后端）")
         
         # 等待设备完全初始化
         time.sleep(0.2)
@@ -190,25 +190,21 @@ class CameraReader:
         # 非 GStreamer 模式才需要设置参数
         if not use_gstreamer:
             try:
-                # 先设置格式为 MJPG（压缩格式，支持更高帧率）
-                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-                self.cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-                
-                # 设置分辨率
+                # 设置分辨率和帧率（不设置 FOURCC，避免触发 GStreamer）
+                # V4L2 会根据配置自动协商格式（MJPG 支持更高帧率）
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                
-                # 设置帧率
                 self.cap.set(cv2.CAP_PROP_FPS, self.fps)
                 
+                # 禁用自动曝光和自动白平衡以提高稳定性
+                self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                
                 # 验证设置
-                actual_fourcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
                 actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 
-                fourcc_str = "".join([chr((actual_fourcc >> 8*i) & 0xFF) for i in range(4)])
-                print(f"[{self.name}] ✓ 参数设置: {actual_w}x{actual_h} @ {actual_fps:.1f}fps ({fourcc_str})")
+                print(f"[{self.name}] ✓ 参数设置: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (V4L2 自动格式协商)")
                 
             except Exception as e:
                 print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
