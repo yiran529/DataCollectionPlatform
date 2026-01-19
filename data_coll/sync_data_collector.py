@@ -203,41 +203,33 @@ class CameraReader:
         # 等待参数生效
         time.sleep(0.2)
         
-        # 预热（增加容错性和超时处理）
+        # 预热（快速检查，不要求完整预热）
         print(f"[{self.name}] 预热中...", end='', flush=True)
         try:
             read_count = 0
-            timeout = time.time() + 5.0  # 5秒超时
-            for i in range(20):  # 增加预热帧数
+            timeout = time.time() + 3.0  # 快速超时（3秒）
+            
+            for i in range(20):
                 if time.time() > timeout:
-                    print(f" ⚠️ 超时")
-                    print(f"[{self.name}] ⚠️ 预热超时（可能设备响应缓慢）")
                     break
                 
                 ret, frame = self.cap.read()
                 if ret:
                     read_count += 1
-                else:
-                    # 读取失败，不一定是致命错误
-                    pass
+                    if read_count >= 1:  # 只要读到 1 帧就可以了
+                        break
             
-            print(f" ✓ ({read_count}/20 帧)")
-            
-            if read_count == 0:
-                print(f"[{self.name}] ⚠️ 预热无法读取帧，可能是设备问题或分辨率不支持")
-                print(f"[{self.name}] 尝试继续（某些设备首帧延迟较长）")
-                # 再尝试一次
-                time.sleep(0.5)
-                ret, frame = self.cap.read()
-                if not ret:
-                    print(f"[{self.name}] ❌ 仍无法读取，放弃初始化")
-                    return False
+            if read_count > 0:
+                print(f" ✓ ({read_count} 帧)")
+            else:
+                print(f" ⚠️ (0 帧，但继续)")
+                
         except Exception as e:
-            print(f" ✗")
-            print(f"[{self.name}] ❌ 预热异常: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            print(f" ✗ 异常: {e}")
+            # 不返回 False，继续尝试
+        
+        # 小延迟，让驱动程序稳定
+        time.sleep(0.2)
         
         # 检查实际参数
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
