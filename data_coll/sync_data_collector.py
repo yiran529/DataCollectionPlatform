@@ -157,8 +157,9 @@ class CameraReader:
         self.last_ts = 0
         
     def open(self) -> bool:
-        # 检测是否为 Jetson 平台，优先使用 GStreamer 以获得更好的性能
-        use_gstreamer = self._is_jetson_platform()
+        # 注意：GStreamer 在某些 Jetson 配置下可能不稳定，默认禁用
+        # 如需启用 GStreamer，设置环境变量: export USE_GSTREAMER=1
+        use_gstreamer = os.environ.get('USE_GSTREAMER', '0') == '1' and self._is_jetson_platform()
         
         if use_gstreamer:
             # Jetson 平台：使用 GStreamer 管道实现硬件加速
@@ -172,6 +173,7 @@ class CameraReader:
         else:
             # 树莓派或其他平台：使用标准 V4L2
             self.cap = cv2.VideoCapture(self.device_id)
+            print(f"[{self.name}] 使用标准 V4L2 模式")
         
         if not self.cap.isOpened():
             print(f"[{self.name}] 无法打开设备 {self.device_id}")
