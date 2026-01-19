@@ -139,14 +139,7 @@ class HandCollector:
         mono_cfg = cfg.get('mono', {})
         stereo_cfg = cfg.get('stereo', {})
         
-        self.mono = CameraReader(
-            mono_cfg.get('device', 0),
-            mono_cfg.get('width', 1280),
-            mono_cfg.get('height', 1024),
-            mono_cfg.get('fps', 30),
-            f"{self.hand_name}_MONO"
-        )
-        
+        # 创建相机对象（但先不打开）
         self.stereo = CameraReader(
             stereo_cfg.get('device', 2),
             stereo_cfg.get('width', 3840),
@@ -155,8 +148,26 @@ class HandCollector:
             f"{self.hand_name}_STEREO"
         )
         
-        if not self.mono.open() or not self.stereo.open():
-            print(f"[{self.hand_name}] ❌ 相机初始化失败")
+        self.mono = CameraReader(
+            mono_cfg.get('device', 0),
+            mono_cfg.get('width', 1280),
+            mono_cfg.get('height', 1024),
+            mono_cfg.get('fps', 30),
+            f"{self.hand_name}_MONO"
+        )
+        
+        # 重要：先打开 Stereo 摄像头，再打开 Mono
+        # 这样可以避免 USB 竞争条件导致的预热超时
+        print(f"[{self.hand_name}] 打开 Stereo 摄像头...")
+        if not self.stereo.open():
+            print(f"[{self.hand_name}] ❌ Stereo 摄像头初始化失败")
+            self._running = False
+            return
+        
+        print(f"[{self.hand_name}] 打开 Mono 摄像头...")
+        if not self.mono.open():
+            print(f"[{self.hand_name}] ❌ Mono 摄像头初始化失败")
+            self.stereo.cap.release()  # 释放 Stereo
             self._running = False
             return
         
