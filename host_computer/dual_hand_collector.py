@@ -591,7 +591,8 @@ class HandCollector:
         print(f"[{self.hand_name}] 原始数据: {len(stereo_data)} stereo, {len(mono_data)} mono, {len(encoder_data)} encoder")
         
         # 分批对齐数据（优化内存使用）
-        aligned = self._align_data_batch(stereo_data, mono_data, encoder_data)
+        # 使用较宽松的时间差容限（200ms）以适应不同帧率
+        aligned = self._align_data_batch(stereo_data, mono_data, encoder_data, max_time_diff_ms=200.0)
         
         # 清理原始数据，释放内存
         del stereo_data, mono_data, encoder_data
