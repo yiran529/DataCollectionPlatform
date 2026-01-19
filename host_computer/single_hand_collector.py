@@ -69,55 +69,50 @@ def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str
         f.attrs['jpeg_quality'] = jpeg_quality
         f.attrs['created_at'] = datetime.now().isoformat()
         
-        # 创建数据集（使用可变长度数据类型）
-        dt = h5py.special_dtype(vlen=np.uint8)
+        # 准备所有 JPEG 数据和元数据（避免 h5py 索引赋值问题）
+        stereo_jpegs = []
+        mono_jpegs = []
+        angles = []
+        timestamps = []
+        stereo_timestamps = []
+        mono_timestamps = []
+        encoder_timestamps = []
         
-        # 创建数据集（预先分配空间）
-        stereo_ds = f.create_dataset('stereo_jpeg', (n_frames,), dtype=dt)
-        mono_ds = f.create_dataset('mono_jpeg', (n_frames,), dtype=dt)
-        
-        angles = np.zeros(n_frames, dtype=np.float32)
-        timestamps = np.zeros(n_frames, dtype=np.float64)
-        stereo_timestamps = np.zeros(n_frames, dtype=np.float64)
-        mono_timestamps = np.zeros(n_frames, dtype=np.float64)
-        encoder_timestamps = np.zeros(n_frames, dtype=np.float64)
-        
-        # 分批处理和写入（每批100帧）
+        print("  压缩图像...")
+        # 分批处理和压缩（每批100帧）
         batch_size = 100
         for i in range(0, n_frames, batch_size):
             batch_end = min(i + batch_size, n_frames)
             batch_data = data[i:batch_end]
             
-            for j, frame in enumerate(batch_data):
-                idx = i + j
-                
-                # 压缩图像（立即写入，不保存到列表）
+            for frame in batch_data:
+                # 压缩图像
                 success_s, s_jpeg = cv2.imencode('.jpg', frame.stereo, encode_params)
                 success_m, m_jpeg = cv2.imencode('.jpg', frame.mono, encode_params)
                 
                 if not (success_s and success_m):
-                    print(f"\n⚠️ 警告: 第 {idx} 帧图像压缩失败，跳过")
+                    print(f"\n⚠️ 警告: 图像压缩失败，跳过")
                     continue
                 
-                # 对于可变长度数据类型，需要转换为字节对象（h5py 的可变长度数据要求）
-                # cv2.imencode 返回的是 numpy 数组，需要转为 bytes
-                stereo_bytes = bytes(s_jpeg)
-                mono_bytes = bytes(m_jpeg)
+                # 保存到列表（转为 numpy uint8 数组）
+                stereo_jpegs.append(np.asarray(s_jpeg, dtype=np.uint8))
+                mono_jpegs.append(np.asarray(m_jpeg, dtype=np.uint8))
                 
-                stereo_ds[idx] = np.bytes_(stereo_bytes)
-                mono_ds[idx] = np.bytes_(mono_bytes)
-                
-                angles[idx] = frame.angle
-                timestamps[idx] = frame.timestamp
-                stereo_timestamps[idx] = frame.stereo_ts
-                mono_timestamps[idx] = frame.mono_ts
-                encoder_timestamps[idx] = frame.encoder_ts
+                angles.append(frame.angle)
+                timestamps.append(frame.timestamp)
+                stereo_timestamps.append(frame.stereo_ts)
+                mono_timestamps.append(frame.mono_ts)
+                encoder_timestamps.append(frame.encoder_ts)
             
             # 显示进度
             progress = (batch_end / n_frames) * 100
-            print(f"  进度: {batch_end}/{n_frames} ({progress:.1f}%)", end='\r')
+            print(f"  压缩进度: {batch_end}/{n_frames} ({progress:.1f}%)", end='\r')
         
-        print()  # 换行
+        print("\n  创建数据集...")
+        # 创建可变长度数据集并一次性写入所有数据
+        dt = h5py.special_dtype(vlen=np.uint8)
+        f.create_dataset('stereo_jpeg', data=stereo_jpegs, dtype=dt)
+        f.create_dataset('mono_jpeg', data=mono_jpegs, dtype=dt)
         
         # 写入角度和时间戳数据
         f.create_dataset('angles', data=angles, dtype=np.float32)
