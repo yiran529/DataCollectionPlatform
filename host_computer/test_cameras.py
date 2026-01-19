@@ -52,7 +52,7 @@ if mono.open():
     
     if buffer:
         frame = buffer[-1]
-        print(f"✓ 最后一帧: {frame.frame.shape}, ts={frame.timestamp:.3f}")
+        print(f"✓ 最后一帧: {frame.data.shape}, ts={frame.timestamp:.3f}")
     
     mono.stop()
     print("✓ Mono 摄像头关闭")
@@ -83,7 +83,7 @@ if stereo.open():
     
     if buffer:
         frame = buffer[-1]
-        print(f"✓ 最后一帧: {frame.frame.shape}, ts={frame.timestamp:.3f}")
+        print(f"✓ 最后一帧: {frame.data.shape}, ts={frame.timestamp:.3f}")
     
     stereo.stop()
     print("✓ Stereo 摄像头关闭")
