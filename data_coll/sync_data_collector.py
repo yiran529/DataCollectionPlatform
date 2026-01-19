@@ -172,29 +172,52 @@ class CameraReader:
             print(f"[{self.name}] 使用 GStreamer 硬件加速（Jetson 优化）")
         else:
             # 树莓派或其他平台：使用标准 V4L2
+            print(f"[{self.name}] 打开设备 /dev/video{self.device_id}...", end='', flush=True)
             self.cap = cv2.VideoCapture(self.device_id)
+            print(" ✓")
             print(f"[{self.name}] 使用标准 V4L2 模式")
+        
+        # 等待设备完全初始化
+        time.sleep(0.2)
         
         if not self.cap.isOpened():
             print(f"[{self.name}] ❌ 无法打开设备 /dev/video{self.device_id}")
             print(f"[{self.name}] 可能原因：设备被占用、不存在或权限不足")
             return False
         
+        print(f"[{self.name}] ✓ 设备已打开，设置参数...")
+        
         # 非 GStreamer 模式才需要设置参数
         if not use_gstreamer:
-            # 设置 MJPG 格式
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+            try:
+                # 设置 MJPG 格式
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+                print(f"[{self.name}] ✓ 参数设置完成")
+            except Exception as e:
+                print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
+                return False
+        
+        # 等待参数生效
+        time.sleep(0.2)
         
         # 预热（增加容错性）
+        print(f"[{self.name}] 预热中...", end='', flush=True)
         try:
-            for i in range(10):
-                ret = self.cap.read()
-                if not ret and i == 0:
-                    print(f"[{self.name}] ⚠️ 预热时无法读取帧（设备可能需要更长初始化时间）")
+            read_count = 0
+            for i in range(20):  # 增加预热帧数
+                ret, frame = self.cap.read()
+                if ret:
+                    read_count += 1
+            print(f" ✓ ({read_count}/20 帧)")
+            
+            if read_count == 0:
+                print(f"[{self.name}] ⚠️ 预热无法读取帧，设备可能有问题")
+                # 不返回 False，继续尝试
         except Exception as e:
+            print(f" ✗")
             print(f"[{self.name}] ⚠️ 预热异常: {e}")
         
         # 检查实际参数
