@@ -209,20 +209,16 @@ class CameraReader:
         # 非 GStreamer 模式才需要设置参数
         if not use_gstreamer:
             try:
-                # 如果 v4l2-ctl 失败，用 OpenCV 作为后备方案设置参数
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-                
-                # 读取实际参数
+                # v4l2-ctl 已经配置了相机格式和帧率
+                # OpenCV 的 set() 方法会重置相机配置，所以这里只读取不设置
                 actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 
-                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (MJPG)")
+                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (v4l2-ctl 预配置)")
                 
             except Exception as e:
-                print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
+                print(f"[{self.name}] ⚠️ 参数读取异常: {e}")
                 return False
         
         # 等待参数生效
