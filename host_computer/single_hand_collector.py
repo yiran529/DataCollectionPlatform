@@ -99,9 +99,13 @@ def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str
                     print(f"\n⚠️ 警告: 第 {idx} 帧图像压缩失败，跳过")
                     continue
                 
-                # 对于可变长度数据类型，直接传递numpy数组（h5py会自动处理）
-                stereo_ds[idx] = s_jpeg
-                mono_ds[idx] = m_jpeg
+                # 对于可变长度数据类型，需要转换为字节对象（h5py 的可变长度数据要求）
+                # cv2.imencode 返回的是 numpy 数组，需要转为 bytes
+                stereo_bytes = bytes(s_jpeg)
+                mono_bytes = bytes(m_jpeg)
+                
+                stereo_ds[idx] = np.bytes_(stereo_bytes)
+                mono_ds[idx] = np.bytes_(mono_bytes)
                 
                 angles[idx] = frame.angle
                 timestamps[idx] = frame.timestamp
