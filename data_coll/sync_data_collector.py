@@ -175,18 +175,19 @@ class CameraReader:
             # 首先用 v4l2-ctl 配置相机参数（OpenCV 的 set 方法不总是有效）
             import subprocess
             try:
+                # Python 3.6 兼容性：用 stdout/stderr 代替 capture_output
                 # 设置 MJPG 格式以获得更高帧率
                 subprocess.run(
                     ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', 
                      '--set-fmt-video', f'width={self.width},height={self.height},pixelformat=MJPG'],
-                    check=False, capture_output=True
+                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 # 设置帧率
                 subprocess.run(
                     ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', '-p', str(int(self.fps))],
-                    check=False, capture_output=True
+                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
-                print(f"[{self.name}] v4l2-ctl 配置: {self.width}x{self.height} @ {self.fps}fps MJPG")
+                print(f"[{self.name}] ✓ v4l2-ctl 配置: {self.width}x{self.height} @ {self.fps}fps MJPG")
             except Exception as e:
                 print(f"[{self.name}] ⚠️ v4l2-ctl 配置失败（可能未安装）: {e}")
             
@@ -208,16 +209,20 @@ class CameraReader:
         # 非 GStreamer 模式才需要设置参数
         if not use_gstreamer:
             try:
-                # v4l2-ctl 已经配置了相机格式和帧率
-                # 这里只需读取相机的实际参数
+                # 如果 v4l2-ctl 失败，用 OpenCV 作为后备方案设置参数
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+                
+                # 读取实际参数
                 actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 
-                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (MJPG 通过 v4l2-ctl 配置)")
+                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps (MJPG)")
                 
             except Exception as e:
-                print(f"[{self.name}] ⚠️ 参数读取异常: {e}")
+                print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
                 return False
         
         # 等待参数生效
