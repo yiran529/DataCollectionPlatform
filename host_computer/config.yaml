@@ -3,12 +3,12 @@ left_hand:
     device: 1
     width: 1600
     height: 1300
-    fps: 5
+    fps: 30
   stereo:
     device: 0
     width: 3840
     height: 1080
-    fps: 1
+    fps: 30
     calibration_file: stereo_calibration/left/stereo_calibration_left.json
     calibration:
       left_camera_matrix:
@@ -138,12 +138,12 @@ right_hand:
     device: 1
     width: 1600
     height: 1300
-    fps: 5
+    fps: 30
   stereo:
     device: 0
     width: 3840
     height: 1080
-    fps: 1
+    fps: 30
     calibration_file: stereo_calibration/right/stereo_calibration_right.json
     calibration:
       left_camera_matrix:

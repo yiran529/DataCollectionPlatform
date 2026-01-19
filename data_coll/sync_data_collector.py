@@ -190,12 +190,26 @@ class CameraReader:
         # 非 GStreamer 模式才需要设置参数
         if not use_gstreamer:
             try:
-                # 设置 MJPG 格式
-                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                # 先设置格式为 MJPG（压缩格式，支持更高帧率）
+                fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+                self.cap.set(cv2.CAP_PROP_FOURCC, fourcc)
+                
+                # 设置分辨率
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                
+                # 设置帧率
                 self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-                print(f"[{self.name}] ✓ 参数设置完成")
+                
+                # 验证设置
+                actual_fourcc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                
+                fourcc_str = "".join([chr((actual_fourcc >> 8*i) & 0xFF) for i in range(4)])
+                print(f"[{self.name}] ✓ 参数设置: {actual_w}x{actual_h} @ {actual_fps:.1f}fps ({fourcc_str})")
+                
             except Exception as e:
                 print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
                 return False
