@@ -1,14 +1,14 @@
 left_hand:
   mono:
-    device: 10
+    device: 1
     width: 1600
-    height: 1200
-    fps: 30
+    height: 1300
+    fps: 5
   stereo:
-    device: 8
+    device: 0
     width: 3840
     height: 1080
-    fps: 30
+    fps: 1
     calibration_file: stereo_calibration/left/stereo_calibration_left.json
     calibration:
       left_camera_matrix:
@@ -135,15 +135,15 @@ left_hand:
       calibrated: true
 right_hand:
   mono:
-    device: 6
+    device: 1
     width: 1600
-    height: 1200
-    fps: 30
+    height: 1300
+    fps: 5
   stereo:
-    device: 4
+    device: 0
     width: 3840
     height: 1080
-    fps: 30
+    fps: 1
     calibration_file: stereo_calibration/right/stereo_calibration_right.json
     calibration:
       left_camera_matrix:
