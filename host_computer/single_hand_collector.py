@@ -18,8 +18,8 @@ import time
 import yaml
 from typing import List
 
-# 导入dual_hand_collector中的类
-from dual_hand_collector import HandCollector, HandFrame, visualize_hand
+# 导入hand_collector中的类
+from hand_collector import HandCollector, HandFrame, visualize_hand
 
 try:
     import h5py
