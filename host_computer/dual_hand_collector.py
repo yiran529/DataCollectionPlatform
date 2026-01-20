@@ -493,11 +493,15 @@ class HandCollector:
                 if s_data:
                     self._record_stats['frames'] += len(s_data)
                 
-                # 每5秒打印一次进度
+                # 每5秒打印一次进度和两个摄像头的实际帧率
                 now = time.time()
                 if now - self._record_stats['last_print'] >= 5.0:
                     elapsed = now - self._record_start_ts
-                    fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
+                    total_fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
+                    
+                    # 获取双目和单目摄像头的实际帧率
+                    stereo_fps = self.stereo.get_fps()
+                    mono_fps = self.mono.get_fps()
                     
                     # 检查内存使用
                     if process:
@@ -510,13 +514,13 @@ class HandCollector:
                                 print(f"\n[{self.hand_name}] ⚠️ 内存使用较高: {mem_gb:.1f}GB ({mem_mb:.0f}MB)")
                             
                             encoder_count = len(self._recorded_encoder)
-                            print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f} fps, {encoder_count} encoder, {mem_gb:.1f}GB)", end='\r')
+                            print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count} | 内存: {mem_gb:.1f}GB", end='\r')
                         except:
                             encoder_count = len(self._recorded_encoder)
-                            print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f} fps, {encoder_count} encoder)", end='\r')
+                            print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count}", end='\r')
                     else:
                         encoder_count = len(self._recorded_encoder)
-                        print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f} fps, {encoder_count} encoder)", end='\r')
+                        print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count}", end='\r')
                     
                     self._record_stats['last_print'] = now
             
@@ -588,7 +592,15 @@ class HandCollector:
             mono_data = list(self._recorded_mono)
             encoder_data = list(self._recorded_encoder)
         
+        # 计算录制统计信息
+        record_duration = time.time() - self._record_start_ts
+        stereo_fps = len(stereo_data) / record_duration if record_duration > 0 else 0
+        mono_fps = len(mono_data) / record_duration if record_duration > 0 else 0
+        encoder_fps = len(encoder_data) / record_duration if record_duration > 0 else 0
+        
         print(f"[{self.hand_name}] 原始数据: {len(stereo_data)} stereo, {len(mono_data)} mono, {len(encoder_data)} encoder")
+        print(f"[{self.hand_name}] 录制时长: {record_duration:.2f}s")
+        print(f"[{self.hand_name}] 实际帧率: 双目={stereo_fps:.2f}fps, 单目={mono_fps:.2f}fps, 编码器={encoder_fps:.2f}fps")
         
         # 分批对齐数据（优化内存使用）
         # 使用较宽松的时间差容限（200ms）以适应不同帧率
