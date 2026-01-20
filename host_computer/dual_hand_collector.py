@@ -481,14 +481,23 @@ class HandCollector:
         
         process = None
         memory_warning_threshold = 3 * 1024 * 1024 * 1024  # 3GB警告阈值（降低以提前预警）
+        initial_memory_mb = 0
+        peak_memory_mb = 0
+        last_memory_mb = 0
+        
         if HAS_PSUTIL:
             try:
                 process = psutil.Process(os.getpid())
+                initial_memory_mb = process.memory_info().rss / (1024 * 1024)
+                peak_memory_mb = initial_memory_mb
             except:
                 pass
         
         # JPEG压缩参数
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
+        
+        # 内存显示频率（每次循环都更新，但只每2秒打印一次详细信息）
+        last_detailed_print = time.time()
         
         while self._recording:
             time.sleep(0.1)  # 保持0.1秒采样间隔
@@ -543,37 +552,66 @@ class HandCollector:
                 self._recording = False
                 break
             
-            # 定期打印进度
+            # 实时内存监控和进度显示
             now = time.time()
-            if now - self._record_stats['last_print'] >= 5.0:
-                elapsed = now - self._record_start_ts
-                total_fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
-                
-                # 获取双目和单目摄像头的实际帧率
-                stereo_fps = self.stereo.get_fps()
-                mono_fps = self.mono.get_fps()
-                encoder_count = len(self._recorded_encoder)
-                
-                # 检查内存使用
-                if process:
-                    try:
-                        mem_info = process.memory_info()
-                        mem_mb = mem_info.rss / (1024 * 1024)
-                        mem_gb = mem_mb / 1024
+            elapsed = now - self._record_start_ts
+            total_fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
+            
+            # 获取双目和单目摄像头的实际帧率
+            stereo_fps = self.stereo.get_fps()
+            mono_fps = self.mono.get_fps()
+            encoder_count = len(self._recorded_encoder)
+            
+            # 实时检查内存使用（每次循环）
+            if process:
+                try:
+                    mem_info = process.memory_info()
+                    mem_mb = mem_info.rss / (1024 * 1024)
+                    mem_gb = mem_mb / 1024
+                    
+                    # 更新峰值内存
+                    if mem_mb > peak_memory_mb:
+                        peak_memory_mb = mem_mb
+                    
+                    # 计算内存增长
+                    mem_delta_mb = mem_mb - initial_memory_mb
+                    mem_growth_rate = mem_delta_mb / elapsed if elapsed > 0 else 0
+                    
+                    # 内存警告（自动停止）
+                    if mem_info.rss > memory_warning_threshold:
+                        print(f"\n⚠️ [{self.hand_name}] 内存使用过高: {mem_gb:.1f}GB（峰值: {peak_memory_mb/1024:.1f}GB），自动停止录制")
+                        self._recording = False
+                        break
+                    
+                    # 每0.5秒更新一次简单显示
+                    if now - self._record_stats['last_print'] >= 0.5:
+                        print(f"[{self.hand_name}] 录制: {current_frames}帧 {elapsed:.1f}s | FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f} 单目: {mono_fps:.1f} | 内存: {mem_mb:.0f}MB (+{mem_delta_mb:.0f}MB) 峰值: {peak_memory_mb:.0f}MB", end='\r')
+                        self._record_stats['last_print'] = now
+                    
+                    # 每2秒打印一次详细信息
+                    if now - last_detailed_print >= 2.0:
+                        # 估算录制数据占用（压缩后的JPEG数据）
+                        estimated_data_mb = 0
+                        with self._record_lock:
+                            # 估算：每个JPEG帧约1.5MB（压缩后）
+                            estimated_data_mb = (len(self._recorded_stereo) * 1.5 + len(self._recorded_mono) * 0.5) / 1
                         
-                        # 内存警告（自动停止）
-                        if mem_info.rss > memory_warning_threshold:
-                            print(f"\n⚠️ [{self.hand_name}] 内存使用过高: {mem_gb:.1f}GB，自动停止录制")
-                            self._recording = False
-                            break
-                        
-                        print(f"[{self.hand_name}] 录制中: {current_frames} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count} | 内存: {mem_gb:.1f}GB", end='\r')
-                    except:
+                        print(f"\n[{self.hand_name}] 详细状态:")
+                        print(f"  帧数: stereo={len(self._recorded_stereo)} mono={len(self._recorded_mono)} encoder={encoder_count}")
+                        print(f"  内存: 当前={mem_mb:.0f}MB 峰值={peak_memory_mb:.0f}MB 增长={mem_delta_mb:.0f}MB 速度={mem_growth_rate:.1f}MB/s")
+                        print(f"  估算数据: ~{estimated_data_mb:.0f}MB 压缩后")
+                        last_detailed_print = now
+                    
+                except Exception as e:
+                    # 内存检查失败，使用简单显示
+                    if now - self._record_stats['last_print'] >= 0.5:
                         print(f"[{self.hand_name}] 录制中: {current_frames} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count}", end='\r')
-                else:
+                        self._record_stats['last_print'] = now
+            else:
+                # 没有psutil，使用简单显示
+                if now - self._record_stats['last_print'] >= 0.5:
                     print(f"[{self.hand_name}] 录制中: {current_frames} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count}", end='\r')
-                
-                self._record_stats['last_print'] = now
+                    self._record_stats['last_print'] = now
             
             # 清空缓冲区（与树莓派版本保持一致）
             self.stereo.clear_buffer()
@@ -1076,6 +1114,17 @@ def visualize_hand(collector: HandCollector, hand_name: str):
     angle_history = []
     max_history = 100
     
+    # 内存监控
+    process = None
+    initial_memory_mb = 0
+    if HAS_PSUTIL:
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            initial_memory_mb = process.memory_info().rss / (1024 * 1024)
+        except:
+            pass
+    
     try:
         while True:
             frame = collector.get_current_frame()
@@ -1093,6 +1142,16 @@ def visualize_hand(collector: HandCollector, hand_name: str):
             angle_history.append(angle)
             if len(angle_history) > max_history:
                 angle_history.pop(0)
+            
+            # 获取内存信息
+            mem_text = ""
+            if process:
+                try:
+                    mem_mb = process.memory_info().rss / (1024 * 1024)
+                    mem_delta = mem_mb - initial_memory_mb
+                    mem_text = f"Memory: {mem_mb:.0f}MB (+{mem_delta:.0f}MB)"
+                except:
+                    pass
             
             # 分割双目图像（假设是左右拼接的）
             stereo_h, stereo_w = stereo_img.shape[:2]
@@ -1114,9 +1173,14 @@ def visualize_hand(collector: HandCollector, hand_name: str):
             angle_img = np.zeros((mono_display.shape[0], 400, 3), dtype=np.uint8)
             
             # 绘制当前角度
-            angle_text = f"Angle: {angle:.2f}°"
+            angle_text = f"Angle: {angle:.2f}"
             cv2.putText(angle_img, angle_text, (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            
+            # 绘制内存信息
+            if mem_text:
+                cv2.putText(angle_img, mem_text, (10, 70), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             
             # 绘制角度历史曲线
             if len(angle_history) > 1:
@@ -1192,6 +1256,17 @@ def visualize_dual_hand(collector: DualHandCollector):
     right_angle_history = []
     max_history = 100
     
+    # 内存监控
+    process = None
+    initial_memory_mb = 0
+    if HAS_PSUTIL:
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            initial_memory_mb = process.memory_info().rss / (1024 * 1024)
+        except:
+            pass
+    
     try:
         while True:
             left_frame = collector.left.get_current_frame() if collector.left else None
@@ -1200,6 +1275,16 @@ def visualize_dual_hand(collector: DualHandCollector):
             if left_frame is None and right_frame is None:
                 time.sleep(0.01)
                 continue
+            
+            # 获取内存信息
+            mem_text = ""
+            if process:
+                try:
+                    mem_mb = process.memory_info().rss / (1024 * 1024)
+                    mem_delta = mem_mb - initial_memory_mb
+                    mem_text = f"Memory: {mem_mb:.0f}MB (+{mem_delta:.0f}MB)"
+                except:
+                    pass
             
             displays = []
             
@@ -1231,8 +1316,13 @@ def visualize_dual_hand(collector: DualHandCollector):
                 angle_img = np.zeros((mono_display.shape[0], 300, 3), dtype=np.uint8)
                 angle_img_h = angle_img.shape[0]
                 angle_img_w = angle_img.shape[1]
-                cv2.putText(angle_img, f"L: {angle:.2f}°", (10, 25), 
+                cv2.putText(angle_img, f"L: {angle:.2f}", (10, 25), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # 显示内存（仅在左侧显示一次）
+                if mem_text:
+                    cv2.putText(angle_img, mem_text, (10, 55), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
                 
                 if len(left_angle_history) > 1:
                     points = []
@@ -1287,7 +1377,7 @@ def visualize_dual_hand(collector: DualHandCollector):
                 angle_img = np.zeros((mono_display.shape[0], 300, 3), dtype=np.uint8)
                 angle_img_h = angle_img.shape[0]
                 angle_img_w = angle_img.shape[1]
-                cv2.putText(angle_img, f"R: {angle:.2f}°", (10, 25), 
+                cv2.putText(angle_img, f"R: {angle:.2f}", (10, 25), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
                 if len(right_angle_history) > 1:
