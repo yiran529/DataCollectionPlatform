@@ -222,15 +222,29 @@ class CameraReader:
         # 非 GStreamer 模式才需要设置参数
         if not use_gstreamer:
             try:
-                # v4l2-ctl 已经配置了相机格式和帧率
-                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+                # 通过 OpenCV 显式设置参数（确保与 v4l2-ctl 同步）
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+                
+                time.sleep(0.1)
+                
+                # 读取实际参数验证
                 actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
                 
-                print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps")
+                # 如果参数不匹配，显示警告
+                if actual_w != self.width or actual_h != self.height or abs(actual_fps - self.fps) > 1:
+                    print(f"[{self.name}] ⚠️ 参数不匹配:")
+                    print(f"[{self.name}]   请求: {self.width}x{self.height} @ {self.fps}fps")
+                    print(f"[{self.name}]   实际: {actual_w}x{actual_h} @ {actual_fps:.1f}fps")
+                else:
+                    print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps")
                 
             except Exception as e:
-                print(f"[{self.name}] ⚠️ 参数读取异常: {e}")
+                print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
                 return False
         
         # 等待参数生效
