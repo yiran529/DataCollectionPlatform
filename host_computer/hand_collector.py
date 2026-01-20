@@ -537,12 +537,13 @@ class HandCollector:
                     if not success:
                         continue
                     
-                    jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8)
+                    # 转换为bytes（vlen数据集需要）
+                    jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8).tobytes()
                     
                     # 流式追加到HDF5
                     with self._record_lock:
                         stereo_ds.resize((stereo_ds.shape[0] + 1,))
-                        stereo_ds[-1] = jpeg_bytes
+                        stereo_ds[-1] = np.frombuffer(jpeg_bytes, dtype=np.uint8)
                         
                         stereo_ts_ds.resize((stereo_ts_ds.shape[0] + 1,))
                         stereo_ts_ds[-1] = frame.timestamp
@@ -557,11 +558,12 @@ class HandCollector:
                 for frame in new_mono:
                     success, jpeg_data = cv2.imencode('.jpg', frame.data, encode_params)
                     if success:
-                        jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8)
+                        # 转换为bytes（vlen数据集需要）
+                        jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8).tobytes()
                         
                         with self._record_lock:
                             mono_ds.resize((mono_ds.shape[0] + 1,))
-                            mono_ds[-1] = jpeg_bytes
+                            mono_ds[-1] = np.frombuffer(jpeg_bytes, dtype=np.uint8)
                             
                             mono_ts_ds.resize((mono_ts_ds.shape[0] + 1,))
                             mono_ts_ds[-1] = frame.timestamp
