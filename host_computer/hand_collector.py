@@ -8,7 +8,7 @@ import yaml
 import json
 import glob
 from dataclasses import dataclass
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from collections import deque
 
 # 添加父目录到路径，以便导入sync_data_collector
@@ -71,20 +71,22 @@ class HandCollector:
         self.stereo_map2_r = None
         self.stereo_calibration = None
         
-        # 录制数据（使用deque限制大小，自动丢弃旧数据）
-        # 最大录制帧数：默认1800帧（30fps*60秒）
+        # 流式HDF5录制（不再使用deque存储数据）
         max_frames = config.get('max_record_frames', 1800)
         self._max_record_frames = max_frames
         self._record_start_ts = 0
-        self._recorded_stereo: deque = deque(maxlen=max_frames)
-        self._recorded_mono: deque = deque(maxlen=max_frames)
-        self._recorded_encoder: deque = deque(maxlen=max_frames)
+        
+        # 临时HDF5文件路径
+        self._temp_h5_path = None
+        self._temp_h5_file = None
+        
+        # 轻量级元数据（只存储时间戳和索引）
+        self._frame_count = 0
+        self._last_copied_idx = {'stereo': 0, 'mono': 0, 'encoder': 0}
+        
         self._record_lock = threading.Lock()
         self._record_thread = None
         self._record_stats = {'frames': 0, 'last_print': 0}
-        
-        # 增量复制：记录上次处理的索引
-        self._last_copied_idx = {'stereo': 0, 'mono': 0, 'encoder': 0}
         
         # JPEG压缩质量
         self._jpeg_quality = config.get('jpeg_quality', 85)
@@ -433,12 +435,9 @@ class HandCollector:
             return False
         
         with self._record_lock:
-            self._recorded_stereo.clear()
-            self._recorded_mono.clear()
-            self._recorded_encoder.clear()
             self._record_stats = {'frames': 0, 'last_print': time.time()}
-            # 重置增量复制索引
             self._last_copied_idx = {'stereo': 0, 'mono': 0, 'encoder': 0}
+            self._frame_count = 0
         
         self.stereo.clear_buffer()
         self.mono.clear_buffer()
@@ -454,14 +453,14 @@ class HandCollector:
         return True
     
     def _record_loop(self):
-        """录制循环（增量复制 + 实时JPEG压缩优化）"""
+        """录制循环（流式HDF5写入，实时校正）"""
         import os
+        import tempfile
         
         process = None
-        memory_warning_threshold = 3 * 1024 * 1024 * 1024  # 3GB警告阈值（降低以提前预警）
+        memory_warning_threshold = 500 * 1024 * 1024  # 500MB警告阈值（大幅降低）
         initial_memory_mb = 0
         peak_memory_mb = 0
-        last_memory_mb = 0
         
         if HAS_PSUTIL:
             try:
@@ -471,137 +470,241 @@ class HandCollector:
             except:
                 pass
         
+        # 创建临时HDF5文件
+        try:
+            self._temp_h5_path = tempfile.mktemp(suffix='.h5', prefix=f'{self.hand_name}_temp_')
+            self._temp_h5_file = h5py.File(self._temp_h5_path, 'w')
+            
+            # 创建可扩展数据集
+            dt_vlen = h5py.special_dtype(vlen=np.uint8)
+            stereo_ds = self._temp_h5_file.create_dataset(
+                'stereo_jpeg', shape=(0,), maxshape=(None,), dtype=dt_vlen
+            )
+            mono_ds = self._temp_h5_file.create_dataset(
+                'mono_jpeg', shape=(0,), maxshape=(None,), dtype=dt_vlen
+            )
+            stereo_ts_ds = self._temp_h5_file.create_dataset(
+                'stereo_timestamps', shape=(0,), maxshape=(None,), dtype=np.float64
+            )
+            mono_ts_ds = self._temp_h5_file.create_dataset(
+                'mono_timestamps', shape=(0,), maxshape=(None,), dtype=np.float64
+            )
+            encoder_angles_ds = self._temp_h5_file.create_dataset(
+                'encoder_angles', shape=(0,), maxshape=(None,), dtype=np.float32
+            )
+            encoder_ts_ds = self._temp_h5_file.create_dataset(
+                'encoder_timestamps', shape=(0,), maxshape=(None,), dtype=np.float64
+            )
+            
+            print(f"[{self.hand_name}] 创建临时文件: {self._temp_h5_path}")
+            
+        except Exception as e:
+            print(f"[{self.hand_name}] ❌ 创建临时HDF5文件失败: {e}")
+            self._recording = False
+            return
+        
         # JPEG压缩参数
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
         
-        # 内存显示频率（每次循环都更新，但只每2秒打印一次详细信息）
         last_detailed_print = time.time()
+        last_stereo_idx = 0
+        last_mono_idx = 0
+        last_encoder_idx = 0
         
-        while self._recording:
-            time.sleep(0.1)  # 保持0.1秒采样间隔
-            
-            # 获取当前缓冲区（全量）
-            s_data = self.stereo.get_buffer()
-            m_data = self.mono.get_buffer()
-            e_data = self.encoder.get_buffer() if self.encoder else []
-            
-            # 增量复制：只处理新增的帧
-            new_stereo = [f for f in s_data if f.idx > self._last_copied_idx['stereo']]
-            new_mono = [f for f in m_data if f.idx > self._last_copied_idx['mono']]
-            new_encoder = [f for f in e_data if f.idx > self._last_copied_idx['encoder']]
-            
-            # 实时JPEG压缩新帧
-            compressed_stereo = []
-            for frame in new_stereo:
-                success, jpeg_data = cv2.imencode('.jpg', frame.data, encode_params)
-                if success:
-                    # 将JPEG字节数据包装为SensorFrame
-                    compressed_stereo.append(SensorFrame(frame.timestamp, np.asarray(jpeg_data, dtype=np.uint8), frame.idx))
-            
-            compressed_mono = []
-            for frame in new_mono:
-                success, jpeg_data = cv2.imencode('.jpg', frame.data, encode_params)
-                if success:
-                    compressed_mono.append(SensorFrame(frame.timestamp, np.asarray(jpeg_data, dtype=np.uint8), frame.idx))
-            
-            # 追加到录制列表（线程安全）
-            with self._record_lock:
-                self._recorded_stereo.extend(compressed_stereo)
-                self._recorded_mono.extend(compressed_mono)
-                self._recorded_encoder.extend(new_encoder)
+        try:
+            while self._recording:
+                time.sleep(0.01)  # 10ms轮询（更频繁）
                 
-                current_frames = len(self._recorded_stereo)
+                # 获取新帧（增量）
+                s_data = self.stereo.get_buffer()
+                m_data = self.mono.get_buffer()
+                e_data = self.encoder.get_buffer() if self.encoder else []
                 
-                # 更新统计
-                if compressed_stereo:
-                    self._record_stats['frames'] += len(compressed_stereo)
-            
-            # 更新索引
-            if new_stereo:
-                self._last_copied_idx['stereo'] = new_stereo[-1].idx
-            if new_mono:
-                self._last_copied_idx['mono'] = new_mono[-1].idx
-            if new_encoder:
-                self._last_copied_idx['encoder'] = new_encoder[-1].idx
-            
-            # 检查是否达到最大帧数限制
-            if current_frames >= self._max_record_frames:
-                print(f"\n⚠️ [{self.hand_name}] 达到最大录制帧数 {self._max_record_frames}，自动停止")
-                self._recording = False
-                break
-            
-            # 实时内存监控和进度显示
-            now = time.time()
-            elapsed = now - self._record_start_ts
-            total_fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
-            
-            # 获取双目和单目摄像头的实际帧率
-            stereo_fps = self.stereo.get_fps()
-            mono_fps = self.mono.get_fps()
-            encoder_count = len(self._recorded_encoder)
-            
-            # 实时检查内存使用（每次循环）
-            if process:
-                try:
-                    mem_info = process.memory_info()
-                    mem_mb = mem_info.rss / (1024 * 1024)
-                    mem_gb = mem_mb / 1024
+                new_stereo = [f for f in s_data if f.idx > last_stereo_idx]
+                new_mono = [f for f in m_data if f.idx > last_mono_idx]
+                new_encoder = [f for f in e_data if f.idx > last_encoder_idx]
+                
+                # ⭐ 核心：处理新的stereo帧（实时校正+压缩+写盘）
+                for frame in new_stereo:
+                    # 实时校正（在压缩前）
+                    if self.stereo_rectify_enabled:
+                        rectified = self._rectify_stereo(frame.data)
+                    else:
+                        rectified = frame.data
                     
-                    # 更新峰值内存
-                    if mem_mb > peak_memory_mb:
-                        peak_memory_mb = mem_mb
+                    # 压缩
+                    success, jpeg_data = cv2.imencode('.jpg', rectified, encode_params)
+                    if not success:
+                        continue
                     
-                    # 计算内存增长
-                    mem_delta_mb = mem_mb - initial_memory_mb
-                    mem_growth_rate = mem_delta_mb / elapsed if elapsed > 0 else 0
+                    jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8)
                     
-                    # 内存警告（自动停止）
-                    if mem_info.rss > memory_warning_threshold:
-                        print(f"\n⚠️ [{self.hand_name}] 内存使用过高: {mem_gb:.1f}GB（峰值: {peak_memory_mb/1024:.1f}GB），自动停止录制")
-                        self._recording = False
-                        break
-                    
-                    # 每0.5秒更新一次简单显示
-                    if now - self._record_stats['last_print'] >= 0.5:
-                        print(f"[{self.hand_name}] 录制: {current_frames}帧 {elapsed:.1f}s | FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f} 单目: {mono_fps:.1f} | 内存: {mem_mb:.0f}MB (+{mem_delta_mb:.0f}MB) 峰值: {peak_memory_mb:.0f}MB", end='\r')
-                        self._record_stats['last_print'] = now
-                    
-                    # 每2秒打印一次详细信息
-                    if now - last_detailed_print >= 2.0:
-                        # 估算录制数据占用（压缩后的JPEG数据）
-                        estimated_data_mb = 0
-                        with self._record_lock:
-                            # 估算：每个JPEG帧约1.5MB（压缩后）
-                            estimated_data_mb = (len(self._recorded_stereo) * 1.5 + len(self._recorded_mono) * 0.5) / 1
+                    # 流式追加到HDF5
+                    with self._record_lock:
+                        stereo_ds.resize((stereo_ds.shape[0] + 1,))
+                        stereo_ds[-1] = jpeg_bytes
                         
-                        print(f"\n[{self.hand_name}] 详细状态:")
-                        print(f"  帧数: stereo={len(self._recorded_stereo)} mono={len(self._recorded_mono)} encoder={encoder_count}")
-                        print(f"  内存: 当前={mem_mb:.0f}MB 峰值={peak_memory_mb:.0f}MB 增长={mem_delta_mb:.0f}MB 速度={mem_growth_rate:.1f}MB/s")
-                        print(f"  估算数据: ~{estimated_data_mb:.0f}MB 压缩后")
-                        last_detailed_print = now
+                        stereo_ts_ds.resize((stereo_ts_ds.shape[0] + 1,))
+                        stereo_ts_ds[-1] = frame.timestamp
+                        
+                        self._frame_count += 1
+                        self._record_stats['frames'] = self._frame_count
                     
-                except Exception as e:
-                    # 内存检查失败，使用简单显示
+                    # 立即释放内存
+                    del rectified, jpeg_bytes, jpeg_data
+                
+                # 处理mono帧
+                for frame in new_mono:
+                    success, jpeg_data = cv2.imencode('.jpg', frame.data, encode_params)
+                    if success:
+                        jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8)
+                        
+                        with self._record_lock:
+                            mono_ds.resize((mono_ds.shape[0] + 1,))
+                            mono_ds[-1] = jpeg_bytes
+                            
+                            mono_ts_ds.resize((mono_ts_ds.shape[0] + 1,))
+                            mono_ts_ds[-1] = frame.timestamp
+                        
+                        del jpeg_bytes, jpeg_data
+                
+                # 处理encoder数据
+                for frame in new_encoder:
+                    with self._record_lock:
+                        encoder_angles_ds.resize((encoder_angles_ds.shape[0] + 1,))
+                        encoder_angles_ds[-1] = frame.data
+                        
+                        encoder_ts_ds.resize((encoder_ts_ds.shape[0] + 1,))
+                        encoder_ts_ds[-1] = frame.timestamp
+                
+                # 更新索引
+                if new_stereo:
+                    last_stereo_idx = new_stereo[-1].idx
+                if new_mono:
+                    last_mono_idx = new_mono[-1].idx
+                if new_encoder:
+                    last_encoder_idx = new_encoder[-1].idx
+                
+                # 定期刷新到磁盘
+                if self._frame_count % 10 == 0:
+                    self._temp_h5_file.flush()
+                
+                # 检查帧数限制
+                if self._frame_count >= self._max_record_frames:
+                    print(f"\n⚠️ [{self.hand_name}] 达到最大录制帧数 {self._max_record_frames}，自动停止")
+                    self._recording = False
+                    break
+                
+                # 内存监控和进度显示
+                now = time.time()
+                elapsed = now - self._record_start_ts
+                total_fps = self._frame_count / elapsed if elapsed > 0 else 0
+                
+                stereo_fps = self.stereo.get_fps()
+                mono_fps = self.mono.get_fps()
+                
+                if process:
+                    try:
+                        mem_info = process.memory_info()
+                        mem_mb = mem_info.rss / (1024 * 1024)
+                        
+                        if mem_mb > peak_memory_mb:
+                            peak_memory_mb = mem_mb
+                        
+                        mem_delta_mb = mem_mb - initial_memory_mb
+                        
+                        # 内存警告
+                        if mem_info.rss > memory_warning_threshold:
+                            print(f"\n⚠️ [{self.hand_name}] 内存超过500MB: {mem_mb:.0f}MB，可能有问题！")
+                        
+                        # 每0.5秒更新
+                        if now - self._record_stats['last_print'] >= 0.5:
+                            print(f"[{self.hand_name}] 录制: {self._frame_count}帧 {elapsed:.1f}s | FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f} 单目: {mono_fps:.1f} | 内存: {mem_mb:.0f}MB (+{mem_delta_mb:.0f}MB)", end='\r')
+                            self._record_stats['last_print'] = now
+                        
+                        # 每2秒详细信息
+                        if now - last_detailed_print >= 2.0:
+                            file_size_mb = 0
+                            if os.path.exists(self._temp_h5_path):
+                                file_size_mb = os.path.getsize(self._temp_h5_path) / (1024 * 1024)
+                            
+                            print(f"\n[{self.hand_name}] 详细状态:")
+                            print(f"  帧数: stereo={stereo_ds.shape[0]} mono={mono_ds.shape[0]} encoder={encoder_angles_ds.shape[0]}")
+                            print(f"  内存: {mem_mb:.0f}MB (峰值: {peak_memory_mb:.0f}MB)")
+                            print(f"  临时文件: {file_size_mb:.0f}MB")
+                            last_detailed_print = now
+                    
+                    except Exception as e:
+                        if now - self._record_stats['last_print'] >= 0.5:
+                            print(f"[{self.hand_name}] 录制: {self._frame_count}帧 {elapsed:.1f}s | FPS: {total_fps:.1f}", end='\r')
+                            self._record_stats['last_print'] = now
+                else:
                     if now - self._record_stats['last_print'] >= 0.5:
-                        print(f"[{self.hand_name}] 录制中: {current_frames} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count}", end='\r')
+                        print(f"[{self.hand_name}] 录制: {self._frame_count}帧 {elapsed:.1f}s | FPS: {total_fps:.1f}", end='\r')
                         self._record_stats['last_print'] = now
-            else:
-                # 没有psutil，使用简单显示
-                if now - self._record_stats['last_print'] >= 0.5:
-                    print(f"[{self.hand_name}] 录制中: {current_frames} 帧 ({elapsed:.1f}s) | 总FPS: {total_fps:.1f} | 双目: {stereo_fps:.1f}fps | 单目: {mono_fps:.1f}fps | encoder: {encoder_count}", end='\r')
-                    self._record_stats['last_print'] = now
-            
-            # 清空缓冲区（与树莓派版本保持一致）
-            self.stereo.clear_buffer()
-            self.mono.clear_buffer()
-            if self.encoder:
-                self.encoder.clear_buffer()
+                
+                # 清空缓冲区
+                self.stereo.clear_buffer()
+                self.mono.clear_buffer()
+                if self.encoder:
+                    self.encoder.clear_buffer()
+        
+        finally:
+            # 关闭临时文件
+            if self._temp_h5_file:
+                self._temp_h5_file.close()
+                print(f"\n[{self.hand_name}] 临时文件已关闭")
     
     def get_current_frame(self) -> Optional[HandFrame]:
-        """获取当前帧（用于实时预览，应用立体校正）"""
+        """获取当前帧（用于实时预览）"""
         if not self._ready:
             return None
         
+        # 如果正在录制，从 HDF5 读取最后一帧
+        if self._recording and self._temp_h5_file:
+            try:
+                with self._record_lock:
+                    if 'stereo_jpeg' in self._temp_h5_file and self._temp_h5_file['stereo_jpeg'].shape[0] > 0:
+                        stereo_jpeg = self._temp_h5_file['stereo_jpeg'][-1]
+                        stereo_ts = self._temp_h5_file['stereo_timestamps'][-1]
+                        
+                        # 找最近的mono帧
+                        mono_timestamps = self._temp_h5_file['mono_timestamps'][:]
+                        if len(mono_timestamps) > 0:
+                            mono_idx = np.argmin(np.abs(mono_timestamps - stereo_ts))
+                            mono_jpeg = self._temp_h5_file['mono_jpeg'][mono_idx]
+                            mono_ts = mono_timestamps[mono_idx]
+                        else:
+                            return None
+                        
+                        # 解压
+                        stereo_img = cv2.imdecode(stereo_jpeg, cv2.IMREAD_COLOR)
+                        mono_img = cv2.imdecode(mono_jpeg, cv2.IMREAD_COLOR)
+                        
+                        # 获取角度
+                        angle = 0.0
+                        enc_ts = stereo_ts
+                        if 'encoder_angles' in self._temp_h5_file and self._temp_h5_file['encoder_angles'].shape[0] > 0:
+                            enc_timestamps = self._temp_h5_file['encoder_timestamps'][:]
+                            enc_idx = np.argmin(np.abs(enc_timestamps - stereo_ts))
+                            angle = float(self._temp_h5_file['encoder_angles'][enc_idx])
+                            enc_ts = enc_timestamps[enc_idx]
+                        
+                        return HandFrame(
+                            stereo=stereo_img,
+                            mono=mono_img,
+                            angle=angle,
+                            timestamp=stereo_ts,
+                            stereo_ts=stereo_ts,
+                            mono_ts=mono_ts,
+                            encoder_ts=enc_ts,
+                            idx=0
+                        )
+            except Exception as e:
+                print(f"[{self.hand_name}] 警告: 从HDF5读取当前帧失败: {e}")
+                return None
+        
+        # 否则从buffer读取（未录制时）
         s_data = self.stereo.get_buffer()
         m_data = self.mono.get_buffer()
         e_data = self.encoder.get_buffer() if self.encoder else []
@@ -633,185 +736,206 @@ class HandCollector:
             idx=0
         )
     
-    def stop_recording(self) -> List[HandFrame]:
-        """停止录制并返回对齐的数据（分批处理优化内存）"""
+    def stop_recording(self) -> str:
+        """停止录制并返回临时HDF5文件路径（需要后续调用align和save）"""
         if not self._recording:
-            return []
+            return ""
         
-        print(f"\n[{self.hand_name}] 停止录制，处理数据...")
+        print(f"\n[{self.hand_name}] 停止录制...")
         self._recording = False
         if self._record_thread:
-            self._record_thread.join(timeout=2)
+            self._record_thread.join(timeout=5)
         
-        # 收集最后的数据（增量式）
-        s_data = self.stereo.get_buffer()
-        m_data = self.mono.get_buffer()
-        e_data = self.encoder.get_buffer() if self.encoder else []
-        
-        # JPEG压缩参数
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
-        
-        # 增量处理最后的新数据
-        new_stereo = [f for f in s_data if f.idx > self._last_copied_idx['stereo']]
-        new_mono = [f for f in m_data if f.idx > self._last_copied_idx['mono']]
-        new_encoder = [f for f in e_data if f.idx > self._last_copied_idx['encoder']]
-        
-        # 压缩最后的新帧
-        compressed_stereo = []
-        for frame in new_stereo:
-            success, jpeg_data = cv2.imencode('.jpg', frame.data, encode_params)
-            if success:
-                compressed_stereo.append(SensorFrame(frame.timestamp, np.asarray(jpeg_data, dtype=np.uint8), frame.idx))
-        
-        compressed_mono = []
-        for frame in new_mono:
-            success, jpeg_data = cv2.imencode('.jpg', frame.data, encode_params)
-            if success:
-                compressed_mono.append(SensorFrame(frame.timestamp, np.asarray(jpeg_data, dtype=np.uint8), frame.idx))
-        
+        # 关闭HDF5文件
         with self._record_lock:
-            # 添加最后的压缩数据
-            self._recorded_stereo.extend(compressed_stereo)
-            self._recorded_mono.extend(compressed_mono)
-            self._recorded_encoder.extend(new_encoder)
+            if self._temp_h5_file:
+                try:
+                    # 统计信息
+                    n_stereo = self._temp_h5_file['stereo_jpeg'].shape[0] if 'stereo_jpeg' in self._temp_h5_file else 0
+                    n_mono = self._temp_h5_file['mono_jpeg'].shape[0] if 'mono_jpeg' in self._temp_h5_file else 0
+                    n_encoder = self._temp_h5_file['encoder_angles'].shape[0] if 'encoder_angles' in self._temp_h5_file else 0
+                    
+                    record_duration = time.time() - self._record_start_ts
+                    stereo_fps = n_stereo / record_duration if record_duration > 0 else 0
+                    mono_fps = n_mono / record_duration if record_duration > 0 else 0
+                    
+                    # 获取文件大小
+                    temp_path = self._temp_h5_path
+                    file_size_mb = 0
+                    if os.path.exists(temp_path):
+                        file_size_mb = os.path.getsize(temp_path) / 1024 / 1024
+                    
+                    print(f"[{self.hand_name}] 录制完成:")
+                    print(f"  - 双目: {n_stereo}帧 ({stereo_fps:.2f} fps)")
+                    print(f"  - 单目: {n_mono}帧 ({mono_fps:.2f} fps)")
+                    print(f"  - 编码器: {n_encoder}条 ({n_encoder/record_duration:.2f} Hz)")
+                    print(f"  - 时长: {record_duration:.2f}秒")
+                    print(f"  - 文件大小: {file_size_mb:.1f} MB")
+                    
+                    self._temp_h5_file.close()
+                    self._temp_h5_file = None
+                    
+                    return temp_path
+                    
+                except Exception as e:
+                    print(f"[{self.hand_name}] 警告: 关闭临时HDF5文件时出错: {e}")
+                    self._temp_h5_file = None
+                    return ""
             
-            # 复制数据（注意：现在是JPEG压缩的数据）
-            stereo_data = list(self._recorded_stereo)
-            mono_data = list(self._recorded_mono)
-            encoder_data = list(self._recorded_encoder)
-        
-        # 计算录制统计信息
-        record_duration = time.time() - self._record_start_ts
-        stereo_fps = len(stereo_data) / record_duration if record_duration > 0 else 0
-        mono_fps = len(mono_data) / record_duration if record_duration > 0 else 0
-        encoder_fps = len(encoder_data) / record_duration if record_duration > 0 else 0
-        
-        print(f"[{self.hand_name}] 原始数据: {len(stereo_data)} stereo, {len(mono_data)} mono, {len(encoder_data)} encoder")
-        print(f"[{self.hand_name}] 录制时长: {record_duration:.2f}s")
-        print(f"[{self.hand_name}] 实际帧率: 双目={stereo_fps:.2f}fps, 单目={mono_fps:.2f}fps, 编码器={encoder_fps:.2f}fps")
-        
-        # 分批对齐数据（优化内存使用）
-        # 使用较宽松的时间差容限（200ms）以适应不同帧率
-        aligned = self._align_data_batch(stereo_data, mono_data, encoder_data, max_time_diff_ms=200.0)
-        
-        # 清理原始数据，释放内存
-        del stereo_data, mono_data, encoder_data
-        
-        print(f"[{self.hand_name}] 对齐后: {len(aligned)} 帧")
-        
-        return aligned
+            return ""
     
-    def _align_data(self, stereo_data: List[SensorFrame], 
-                   mono_data: List[SensorFrame],
-                   encoder_data: List[SensorFrame],
-                   max_time_diff_ms: float = 50.0) -> List[HandFrame]:
-        """对齐数据（应用立体校正）- 旧版本，保留兼容性"""
-        return self._align_data_batch(stereo_data, mono_data, encoder_data, max_time_diff_ms)
+    def align_and_get_indices(self, max_time_diff_ms: float = 200.0) -> List[Tuple[int, int, int]]:
+        """基于时间戳计算对齐索引（不加载JPEG数据），返回(stereo_idx, mono_idx, encoder_idx)列表"""
+        if not self._temp_h5_path or not os.path.exists(self._temp_h5_path):
+            return []
+        
+        print(f"[{self.hand_name}] 计算对齐索引...")
+        
+        try:
+            with h5py.File(self._temp_h5_path, 'r') as f:
+                # 读取时间戳
+                stereo_ts = f['stereo_timestamps'][:]
+                mono_ts = f['mono_timestamps'][:]
+                encoder_ts = f['encoder_timestamps'][:] if 'encoder_timestamps' in f else np.array([])
+                
+                n_stereo = len(stereo_ts)
+                aligned_indices = []
+                
+                # 对每个stereo帧找最近的mono和encoder
+                for s_idx in range(n_stereo):
+                    s_time = stereo_ts[s_idx]
+                    mono_target = s_time - self.stereo_mono_offset_ms / 1000.0
+                    encoder_target = s_time - self.stereo_encoder_offset_ms / 1000.0
+                    
+                    # 找最近的mono帧
+                    if len(mono_ts) > 0:
+                        mono_diffs = np.abs(mono_ts - mono_target)
+                        m_idx = int(np.argmin(mono_diffs))
+                        if mono_diffs[m_idx] * 1000 > max_time_diff_ms:
+                            continue  # 跳过时间差过大的
+                    else:
+                        continue
+                    
+                    # 找最近的encoder数据
+                    e_idx = 0
+                    if len(encoder_ts) > 0:
+                        enc_diffs = np.abs(encoder_ts - encoder_target)
+                        e_idx = int(np.argmin(enc_diffs))
+                        # encoder允许更大的容限
+                        if enc_diffs[e_idx] * 1000 > max_time_diff_ms * 2:
+                            e_idx = 0  # 使用默认索引（角度=0）
+                    
+                    aligned_indices.append((s_idx, m_idx, e_idx))
+                
+                print(f"[{self.hand_name}] 对齐索引计算完成: {len(aligned_indices)}/{n_stereo} 帧匹配")
+                return aligned_indices
+                
+        except Exception as e:
+            print(f"[{self.hand_name}] 错误: 计算对齐索引失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
     
-    def _align_data_batch(self, stereo_data: List[SensorFrame], 
-                          mono_data: List[SensorFrame],
-                          encoder_data: List[SensorFrame],
-                          max_time_diff_ms: float = 50.0,
-                          batch_size: int = 100) -> List[HandFrame]:
-        """分批对齐数据（优化内存使用，处理JPEG压缩数据）"""
-        aligned = []
-        n_total = len(stereo_data)
+    def save_to_hdf5(self, output_path: str, aligned_indices: List[Tuple[int, int, int]]) -> bool:
+        """将对齐的数据保存到最终HDF5文件（直接复制JPEG，避免重复编码）"""
+        if not self._temp_h5_path or not os.path.exists(self._temp_h5_path):
+            print(f"[{self.hand_name}] 错误: 临时HDF5文件不存在")
+            return False
         
-        # 如果数据量不大，直接处理
-        if n_total <= batch_size:
-            for s in stereo_data:
-                mono_target = s.timestamp - self.stereo_mono_offset_ms / 1000.0
-                encoder_target = s.timestamp - self.stereo_encoder_offset_ms / 1000.0
-                
-                mono = None
-                if mono_data:
-                    best = min(mono_data, key=lambda x: abs(x.timestamp - mono_target))
-                    if abs(best.timestamp - mono_target) * 1000 <= max_time_diff_ms:
-                        mono = best
-                
-                enc = None
-                if encoder_data:
-                    best = min(encoder_data, key=lambda x: abs(x.timestamp - encoder_target))
-                    if abs(best.timestamp - encoder_target) * 1000 <= max_time_diff_ms:
-                        enc = best
-                
-                # 允许没有编码器数据的情况（使用默认角度0）
-                if mono:
-                    # 解压JPEG数据
-                    stereo_img = cv2.imdecode(s.data, cv2.IMREAD_COLOR)
-                    mono_img = cv2.imdecode(mono.data, cv2.IMREAD_COLOR)
-                    
-                    # 应用立体校正
-                    stereo_rectified = self._rectify_stereo(stereo_img)
-                    
-                    aligned.append(HandFrame(
-                        stereo=stereo_rectified,
-                        mono=mono_img,
-                        angle=enc.data if enc else 0.0,
-                        timestamp=s.timestamp,
-                        stereo_ts=s.timestamp,
-                        mono_ts=mono.timestamp,
-                        encoder_ts=enc.timestamp if enc else s.timestamp,
-                        idx=len(aligned) + 1
-                    ))
-        else:
-            # 分批处理
-            for i in range(0, n_total, batch_size):
-                batch_end = min(i + batch_size, n_total)
-                batch_stereo = stereo_data[i:batch_end]
-                
-                batch_aligned = []
-                for s in batch_stereo:
-                    mono_target = s.timestamp - self.stereo_mono_offset_ms / 1000.0
-                    encoder_target = s.timestamp - self.stereo_encoder_offset_ms / 1000.0
-                    
-                    mono = None
-                    if mono_data:
-                        best = min(mono_data, key=lambda x: abs(x.timestamp - mono_target))
-                        if abs(best.timestamp - mono_target) * 1000 <= max_time_diff_ms:
-                            mono = best
-                    
-                    enc = None
-                    if encoder_data:
-                        best = min(encoder_data, key=lambda x: abs(x.timestamp - encoder_target))
-                        if abs(best.timestamp - encoder_target) * 1000 <= max_time_diff_ms:
-                            enc = best
-                    
-                    # 允许没有编码器数据的情况（使用默认角度0）
-                    if mono:
-                        # 解压JPEG数据
-                        stereo_img = cv2.imdecode(s.data, cv2.IMREAD_COLOR)
-                        mono_img = cv2.imdecode(mono.data, cv2.IMREAD_COLOR)
-                        
-                        # 应用立体校正
-                        stereo_rectified = self._rectify_stereo(stereo_img)
-                        
-                        batch_aligned.append(HandFrame(
-                            stereo=stereo_rectified,
-                            mono=mono_img,
-                            angle=enc.data if enc else 0.0,
-                            timestamp=s.timestamp,
-                            stereo_ts=s.timestamp,
-                            mono_ts=mono.timestamp,
-                            encoder_ts=enc.timestamp if enc else s.timestamp,
-                        idx=len(aligned) + len(batch_aligned) + 1
-                    ))
-                
-                aligned.extend(batch_aligned)
-                
-                # 显示进度
-                progress = (batch_end / n_total) * 100
-                print(f"[{self.hand_name}] 对齐进度: {batch_end}/{n_total} ({progress:.1f}%)", end='\r')
-            
-            print()  # 换行
+        if not aligned_indices:
+            print(f"[{self.hand_name}] 错误: 没有对齐索引")
+            return False
         
-        return aligned
+        print(f"[{self.hand_name}] 保存数据到 {output_path} ...")
+        
+        try:
+            with h5py.File(self._temp_h5_path, 'r') as src:
+                with h5py.File(output_path, 'w') as dst:
+                    n_frames = len(aligned_indices)
+                    
+                    # 读取所有数据集
+                    src_stereo_jpeg = src['stereo_jpeg']
+                    src_mono_jpeg = src['mono_jpeg']
+                    src_stereo_ts = src['stereo_timestamps']
+                    src_mono_ts = src['mono_timestamps']
+                    src_encoder_angles = src['encoder_angles']
+                    src_encoder_ts = src['encoder_timestamps']
+                    
+                    # 获取JPEG数据大小（动态）
+                    sample_stereo_jpeg = src_stereo_jpeg[0]
+                    sample_mono_jpeg = src_mono_jpeg[0]
+                    
+                    # 创建目标数据集
+                    dst_stereo = dst.create_dataset('stereo_jpeg', 
+                                                    shape=(n_frames,), 
+                                                    dtype=h5py.vlen_dtype(np.uint8))
+                    dst_mono = dst.create_dataset('mono_jpeg', 
+                                                  shape=(n_frames,), 
+                                                  dtype=h5py.vlen_dtype(np.uint8))
+                    dst_angles = dst.create_dataset('encoder_angles', 
+                                                    shape=(n_frames,), 
+                                                    dtype=np.float32)
+                    dst_stereo_ts = dst.create_dataset('stereo_timestamps', 
+                                                       shape=(n_frames,), 
+                                                       dtype=np.float64)
+                    dst_mono_ts = dst.create_dataset('mono_timestamps', 
+                                                     shape=(n_frames,), 
+                                                     dtype=np.float64)
+                    dst_encoder_ts = dst.create_dataset('encoder_timestamps', 
+                                                        shape=(n_frames,), 
+                                                        dtype=np.float64)
+                    
+                    # 复制对齐的数据
+                    for i, (s_idx, m_idx, e_idx) in enumerate(aligned_indices):
+                        dst_stereo[i] = src_stereo_jpeg[s_idx]
+                        dst_mono[i] = src_mono_jpeg[m_idx]
+                        dst_angles[i] = src_encoder_angles[e_idx]
+                        dst_stereo_ts[i] = src_stereo_ts[s_idx]
+                        dst_mono_ts[i] = src_mono_ts[m_idx]
+                        dst_encoder_ts[i] = src_encoder_ts[e_idx]
+                        
+                        if (i + 1) % 100 == 0 or i == n_frames - 1:
+                            print(f"[{self.hand_name}] 保存进度: {i+1}/{n_frames}", end='\r')
+                    
+                    print()  # 换行
+                    
+                    # 添加元数据
+                    dst.attrs['hand_name'] = self.hand_name
+                    dst.attrs['n_frames'] = n_frames
+                    dst.attrs['stereo_resolution'] = str(self.stereo_resolution)
+                    dst.attrs['mono_resolution'] = str(self.mono_resolution)
+                    dst.attrs['jpeg_quality'] = self._jpeg_quality
+                    
+                    # 获取文件大小
+                    final_size_mb = os.path.getsize(output_path) / 1024 / 1024
+                    print(f"[{self.hand_name}] 保存完成: {n_frames}帧, {final_size_mb:.1f} MB")
+                    
+                    return True
+                    
+        except Exception as e:
+            print(f"[{self.hand_name}] 错误: 保存HDF5失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def cleanup_temp_file(self):
+        """清理临时HDF5文件"""
+        if self._temp_h5_path and os.path.exists(self._temp_h5_path):
+            try:
+                os.remove(self._temp_h5_path)
+                print(f"[{self.hand_name}] 临时文件已删除: {self._temp_h5_path}")
+            except Exception as e:
+                print(f"[{self.hand_name}] 警告: 删除临时文件失败: {e}")
+        self._temp_h5_path = None
     
     def stop(self):
         """停止"""
         self._recording = False
         self._running = False
         self._ready = False
+        
+        # 清理临时文件
+        self.cleanup_temp_file()
         
         if self._record_thread:
             self._record_thread.join(timeout=2)

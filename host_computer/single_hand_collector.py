@@ -28,11 +28,11 @@ except ImportError:
     HAS_H5PY = False
 
 
-def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str,
-                          jpeg_quality: int = 85) -> str:
-    """保存单手数据到HDF5（流式写入优化内存）"""
-    if not data:
-        print("❌ 无数据")
+def save_single_hand_data(temp_h5_path: str, aligned_indices: List, hand_name: str, 
+                          output_dir: str) -> str:
+    """保存单手数据到HDF5（直接复制临时文件中的JPEG数据）"""
+    if not aligned_indices:
+        print("❌ 无对齐索引")
         return None
     
     if not HAS_H5PY:
@@ -48,90 +48,88 @@ def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str
     filename = f"{prefix}_{hand_lower}_hand_data.h5"
     filepath = os.path.join(output_dir, filename)
     
-    n_frames = len(data)
+    n_frames = len(aligned_indices)
     print(f"\n保存{hand_name}手数据: {filepath}")
     print(f"  帧数: {n_frames}")
     
     start_time = time.time()
     
-    # 流式写入HDF5（避免一次性加载所有数据到内存）
-    encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-    
-    print("  写入HDF5（流式）...")
-    write_start = time.time()
-    
-    with h5py.File(filepath, 'w', libver='latest') as f:
-        # 元数据
-        f.attrs['n_frames'] = n_frames
-        f.attrs['hand'] = hand_lower
-        f.attrs['stereo_shape'] = data[0].stereo.shape
-        f.attrs['mono_shape'] = data[0].mono.shape
-        f.attrs['jpeg_quality'] = jpeg_quality
-        f.attrs['created_at'] = datetime.now().isoformat()
-        
-        # 准备所有 JPEG 数据和元数据（避免 h5py 索引赋值问题）
-        stereo_jpegs = []
-        mono_jpegs = []
-        angles = []
-        timestamps = []
-        stereo_timestamps = []
-        mono_timestamps = []
-        encoder_timestamps = []
-        
-        print("  压缩图像...")
-        # 分批处理和压缩（每批100帧）
-        batch_size = 100
-        for i in range(0, n_frames, batch_size):
-            batch_end = min(i + batch_size, n_frames)
-            batch_data = data[i:batch_end]
-            
-            for frame in batch_data:
-                # 压缩图像
-                success_s, s_jpeg = cv2.imencode('.jpg', frame.stereo, encode_params)
-                success_m, m_jpeg = cv2.imencode('.jpg', frame.mono, encode_params)
+    try:
+        with h5py.File(temp_h5_path, 'r') as src:
+            with h5py.File(filepath, 'w') as dst:
+                # 读取源数据集
+                src_stereo_jpeg = src['stereo_jpeg']
+                src_mono_jpeg = src['mono_jpeg']
+                src_stereo_ts = src['stereo_timestamps']
+                src_mono_ts = src['mono_timestamps']
+                src_encoder_angles = src['encoder_angles']
+                src_encoder_ts = src['encoder_timestamps']
                 
-                if not (success_s and success_m):
-                    print(f"\n⚠️ 警告: 图像压缩失败，跳过")
-                    continue
+                # 创建目标数据集
+                dst_stereo = dst.create_dataset('stereo_jpeg', 
+                                                shape=(n_frames,), 
+                                                dtype=h5py.vlen_dtype(np.uint8))
+                dst_mono = dst.create_dataset('mono_jpeg', 
+                                              shape=(n_frames,), 
+                                              dtype=h5py.vlen_dtype(np.uint8))
+                dst_angles = dst.create_dataset('angles', 
+                                                shape=(n_frames,), 
+                                                dtype=np.float32)
+                dst_timestamps = dst.create_dataset('timestamps', 
+                                                    shape=(n_frames,), 
+                                                    dtype=np.float64)
+                dst_stereo_ts = dst.create_dataset('stereo_timestamps', 
+                                                   shape=(n_frames,), 
+                                                   dtype=np.float64)
+                dst_mono_ts = dst.create_dataset('mono_timestamps', 
+                                                 shape=(n_frames,), 
+                                                 dtype=np.float64)
+                dst_encoder_ts = dst.create_dataset('encoder_timestamps', 
+                                                    shape=(n_frames,), 
+                                                    dtype=np.float64)
                 
-                # 保存到列表（转为 numpy uint8 数组）
-                stereo_jpegs.append(np.asarray(s_jpeg, dtype=np.uint8))
-                mono_jpegs.append(np.asarray(m_jpeg, dtype=np.uint8))
+                # 复制对齐的数据
+                for i, (s_idx, m_idx, e_idx) in enumerate(aligned_indices):
+                    dst_stereo[i] = src_stereo_jpeg[s_idx]
+                    dst_mono[i] = src_mono_jpeg[m_idx]
+                    dst_angles[i] = src_encoder_angles[e_idx]
+                    dst_timestamps[i] = src_stereo_ts[s_idx]  # 使用stereo时间戳作为主时间戳
+                    dst_stereo_ts[i] = src_stereo_ts[s_idx]
+                    dst_mono_ts[i] = src_mono_ts[m_idx]
+                    dst_encoder_ts[i] = src_encoder_ts[e_idx]
+                    
+                    if (i + 1) % 100 == 0 or i == n_frames - 1:
+                        print(f"  保存进度: {i+1}/{n_frames}", end='\r')
                 
-                angles.append(frame.angle)
-                timestamps.append(frame.timestamp)
-                stereo_timestamps.append(frame.stereo_ts)
-                mono_timestamps.append(frame.mono_ts)
-                encoder_timestamps.append(frame.encoder_ts)
-            
-            # 显示进度
-            progress = (batch_end / n_frames) * 100
-            print(f"  压缩进度: {batch_end}/{n_frames} ({progress:.1f}%)", end='\r')
+                print()  # 换行
+                
+                # 添加元数据
+                dst.attrs['n_frames'] = n_frames
+                dst.attrs['hand'] = hand_lower
+                dst.attrs['created_at'] = datetime.now().isoformat()
+                
+                # 从源复制分辨率等元数据
+                if 'stereo_resolution' in src.attrs:
+                    dst.attrs['stereo_resolution'] = src.attrs['stereo_resolution']
+                if 'mono_resolution' in src.attrs:
+                    dst.attrs['mono_resolution'] = src.attrs['mono_resolution']
+                if 'jpeg_quality' in src.attrs:
+                    dst.attrs['jpeg_quality'] = src.attrs['jpeg_quality']
         
-        print("\n  创建数据集...")
-        # 创建可变长度数据集并一次性写入所有数据
-        dt = h5py.special_dtype(vlen=np.uint8)
-        f.create_dataset('stereo_jpeg', data=stereo_jpegs, dtype=dt)
-        f.create_dataset('mono_jpeg', data=mono_jpegs, dtype=dt)
+        total_time = time.time() - start_time
+        file_size = os.path.getsize(filepath) / (1024 * 1024)
         
-        # 写入角度和时间戳数据
-        f.create_dataset('angles', data=angles, dtype=np.float32)
-        f.create_dataset('timestamps', data=timestamps, dtype=np.float64)
-        f.create_dataset('stereo_timestamps', data=stereo_timestamps, dtype=np.float64)
-        f.create_dataset('mono_timestamps', data=mono_timestamps, dtype=np.float64)
-        f.create_dataset('encoder_timestamps', data=encoder_timestamps, dtype=np.float64)
-    
-    write_time = time.time() - write_start
-    total_time = time.time() - start_time
-    
-    file_size = os.path.getsize(filepath) / (1024 * 1024)
-    
-    print(f"  写入耗时: {write_time:.2f}s")
-    print(f"  总耗时: {total_time:.2f}s")
-    print(f"  文件大小: {file_size:.1f}MB")
-    print(f"✅ 保存完成: {filepath}")
-    
-    return filepath
+        print(f"  总耗时: {total_time:.2f}s")
+        print(f"  文件大小: {file_size:.1f}MB")
+        print(f"✅ 保存完成: {filepath}")
+        
+        return filepath
+        
+    except Exception as e:
+        print(f"❌ 保存失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 if __name__ == "__main__":
@@ -195,14 +193,29 @@ if __name__ == "__main__":
             collector.start_recording()
             print(f"[{hand_name}] 录制中... 按回车键停止录制")
             input()
-            data = collector.stop_recording()
             
-            if data:
-                print(f"\n[{hand_name}] 录制完成: {len(data)} 帧")
-                save_cfg = config.get('save', {})
-                output_dir = save_cfg.get('output_dir', './data')
-                jpeg_quality = save_cfg.get('jpeg_quality', 85)
-                save_single_hand_data(data, hand_name, output_dir, jpeg_quality)
+            # 停止录制并获取临时HDF5路径
+            temp_h5_path = collector.stop_recording()
+            
+            if temp_h5_path:
+                # 计算对齐索引
+                aligned_indices = collector.align_and_get_indices(max_time_diff_ms=200.0)
+                
+                if aligned_indices:
+                    print(f"\n[{hand_name}] 对齐完成: {len(aligned_indices)} 帧")
+                    save_cfg = config.get('save', {})
+                    output_dir = save_cfg.get('output_dir', './data')
+                    
+                    # 保存数据
+                    saved_path = save_single_hand_data(temp_h5_path, aligned_indices, 
+                                                      hand_name, output_dir)
+                    
+                    # 清理临时文件
+                    collector.cleanup_temp_file()
+                else:
+                    print(f"\n[{hand_name}] 警告: 对齐失败")
+            else:
+                print(f"\n[{hand_name}] 警告: 录制失败")
         
         collector.stop()
         
