@@ -11,7 +11,7 @@ import sys
 def run_cmd(cmd):
     """运行命令并返回输出"""
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+        result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
         return result.stdout + result.stderr
     except subprocess.TimeoutExpired:
         return f"❌ 命令超时: {cmd}"
