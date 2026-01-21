@@ -606,9 +606,9 @@ class HandCollector:
         """写入线程循环（批量处理队列中的数据）"""
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
         batch_buffer = []
-        batch_size = 10  # 每批处理10帧
+        batch_size = 20  # 增大批次到20帧，减少IO次数
         last_write_time = time.time()
-        max_wait_time = 0.5  # 最长等待0.5秒就写入（即使不满一批）
+        max_wait_time = 0.3  # 减少等待时间到0.3秒，提高响应速度
         
         while self._recording or not self._write_queue.empty():
             try:
@@ -641,9 +641,11 @@ class HandCollector:
             self._write_batch(batch_buffer, encode_params)
     
     def _write_batch(self, batch_buffer: list, encode_params: list):
-        """批量写入数据到HDF5"""
+        """批量写入数据到HDF5（使用二分查找优化对齐）"""
         try:
-            # 收集并对齐所有批次数据
+            import bisect
+            
+            # 收集所有批次数据
             all_stereo = []
             all_mono = []
             all_encoder = []
@@ -656,23 +658,47 @@ class HandCollector:
             if not all_stereo:
                 return
             
-            # 对齐数据
+            # 预先排序（一次性操作）
+            mono_sorted = sorted(all_mono, key=lambda x: x.timestamp) if all_mono else []
+            encoder_sorted = sorted(all_encoder, key=lambda x: x.timestamp) if all_encoder else []
+            mono_ts = [m.timestamp for m in mono_sorted]
+            encoder_ts = [e.timestamp for e in encoder_sorted]
+            
+            # 对齐数据（使用二分查找）
             aligned_frames = []
+            max_time_diff_s = 0.2  # 200ms容限
+            
             for s in all_stereo:
                 mono_target = s.timestamp - self.stereo_mono_offset_ms / 1000.0
                 encoder_target = s.timestamp - self.stereo_encoder_offset_ms / 1000.0
                 
+                # 二分查找最近的mono帧
                 mono = None
-                if all_mono:
-                    best = min(all_mono, key=lambda x: abs(x.timestamp - mono_target))
-                    if abs(best.timestamp - mono_target) * 1000 <= 200.0:  # 200ms容限
-                        mono = best
+                if mono_sorted:
+                    idx = bisect.bisect_left(mono_ts, mono_target)
+                    candidates = []
+                    if idx > 0:
+                        candidates.append(mono_sorted[idx - 1])
+                    if idx < len(mono_sorted):
+                        candidates.append(mono_sorted[idx])
+                    if candidates:
+                        best = min(candidates, key=lambda x: abs(x.timestamp - mono_target))
+                        if abs(best.timestamp - mono_target) <= max_time_diff_s:
+                            mono = best
                 
+                # 二分查找最近的encoder数据
                 enc = None
-                if all_encoder:
-                    best = min(all_encoder, key=lambda x: abs(x.timestamp - encoder_target))
-                    if abs(best.timestamp - encoder_target) * 1000 <= 200.0:
-                        enc = best
+                if encoder_sorted:
+                    idx = bisect.bisect_left(encoder_ts, encoder_target)
+                    candidates = []
+                    if idx > 0:
+                        candidates.append(encoder_sorted[idx - 1])
+                    if idx < len(encoder_sorted):
+                        candidates.append(encoder_sorted[idx])
+                    if candidates:
+                        best = min(candidates, key=lambda x: abs(x.timestamp - encoder_target))
+                        if abs(best.timestamp - encoder_target) <= max_time_diff_s:
+                            enc = best
                 
                 if mono:
                     aligned_frames.append((s, mono, enc))
@@ -856,29 +882,60 @@ class HandCollector:
                           encoder_data: List[SensorFrame],
                           max_time_diff_ms: float = 50.0,
                           batch_size: int = 100) -> List[HandFrame]:
-        """分批对齐数据（优化内存使用）"""
+        """分批对齐数据（使用二分查找优化性能）"""
+        import bisect
+        
         aligned = []
         n_total = len(stereo_data)
         
-        # 如果数据量不大，直接处理
-        if n_total <= batch_size:
-            for s in stereo_data:
+        if n_total == 0:
+            return aligned
+        
+        # 预先排序并创建时间戳索引（一次性操作）
+        mono_sorted = sorted(mono_data, key=lambda x: x.timestamp) if mono_data else []
+        encoder_sorted = sorted(encoder_data, key=lambda x: x.timestamp) if encoder_data else []
+        mono_ts = [m.timestamp for m in mono_sorted]
+        encoder_ts = [e.timestamp for e in encoder_sorted]
+        
+        max_time_diff_s = max_time_diff_ms / 1000.0
+        
+        # 批量处理
+        for i in range(0, n_total, batch_size):
+            batch_end = min(i + batch_size, n_total)
+            batch_stereo = stereo_data[i:batch_end]
+            
+            for s in batch_stereo:
                 mono_target = s.timestamp - self.stereo_mono_offset_ms / 1000.0
                 encoder_target = s.timestamp - self.stereo_encoder_offset_ms / 1000.0
                 
+                # 使用二分查找找到最近的mono帧
                 mono = None
-                if mono_data:
-                    best = min(mono_data, key=lambda x: abs(x.timestamp - mono_target))
-                    if abs(best.timestamp - mono_target) * 1000 <= max_time_diff_ms:
-                        mono = best
+                if mono_sorted:
+                    idx = bisect.bisect_left(mono_ts, mono_target)
+                    candidates = []
+                    if idx > 0:
+                        candidates.append(mono_sorted[idx - 1])
+                    if idx < len(mono_sorted):
+                        candidates.append(mono_sorted[idx])
+                    if candidates:
+                        best = min(candidates, key=lambda x: abs(x.timestamp - mono_target))
+                        if abs(best.timestamp - mono_target) <= max_time_diff_s:
+                            mono = best
                 
+                # 使用二分查找找到最近的encoder数据
                 enc = None
-                if encoder_data:
-                    best = min(encoder_data, key=lambda x: abs(x.timestamp - encoder_target))
-                    if abs(best.timestamp - encoder_target) * 1000 <= max_time_diff_ms:
-                        enc = best
+                if encoder_sorted:
+                    idx = bisect.bisect_left(encoder_ts, encoder_target)
+                    candidates = []
+                    if idx > 0:
+                        candidates.append(encoder_sorted[idx - 1])
+                    if idx < len(encoder_sorted):
+                        candidates.append(encoder_sorted[idx])
+                    if candidates:
+                        best = min(candidates, key=lambda x: abs(x.timestamp - encoder_target))
+                        if abs(best.timestamp - encoder_target) <= max_time_diff_s:
+                            enc = best
                 
-                # 允许没有编码器数据的情况（使用默认角度0）
                 if mono:
                     # 应用立体校正
                     stereo_rectified = self._rectify_stereo(s.data)
@@ -893,51 +950,13 @@ class HandCollector:
                         encoder_ts=enc.timestamp if enc else s.timestamp,
                         idx=len(aligned) + 1
                     ))
-        else:
-            # 分批处理
-            for i in range(0, n_total, batch_size):
-                batch_end = min(i + batch_size, n_total)
-                batch_stereo = stereo_data[i:batch_end]
-                
-                batch_aligned = []
-                for s in batch_stereo:
-                    mono_target = s.timestamp - self.stereo_mono_offset_ms / 1000.0
-                    encoder_target = s.timestamp - self.stereo_encoder_offset_ms / 1000.0
-                    
-                    mono = None
-                    if mono_data:
-                        best = min(mono_data, key=lambda x: abs(x.timestamp - mono_target))
-                        if abs(best.timestamp - mono_target) * 1000 <= max_time_diff_ms:
-                            mono = best
-                    
-                    enc = None
-                    if encoder_data:
-                        best = min(encoder_data, key=lambda x: abs(x.timestamp - encoder_target))
-                        if abs(best.timestamp - encoder_target) * 1000 <= max_time_diff_ms:
-                            enc = best
-                    
-                    # 允许没有编码器数据的情况（使用默认角度0）
-                    if mono:
-                        # 应用立体校正
-                        stereo_rectified = self._rectify_stereo(s.data)
-                        
-                    batch_aligned.append(HandFrame(
-                        stereo=stereo_rectified,
-                        mono=mono.data,
-                        angle=enc.data if enc else 0.0,
-                        timestamp=s.timestamp,
-                        stereo_ts=s.timestamp,
-                        mono_ts=mono.timestamp,
-                        encoder_ts=enc.timestamp if enc else s.timestamp,
-                        idx=len(aligned) + len(batch_aligned) + 1
-                    ))
-                
-                aligned.extend(batch_aligned)
-                
-                # 显示进度
+            
+            # 显示进度（每批显示一次）
+            if n_total > batch_size:
                 progress = (batch_end / n_total) * 100
                 print(f"[{self.hand_name}] 对齐进度: {batch_end}/{n_total} ({progress:.1f}%)", end='\r')
-            
+        
+        if n_total > batch_size:
             print()  # 换行
         
         return aligned

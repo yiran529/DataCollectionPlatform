@@ -51,6 +51,7 @@ else
         --config "$CONFIG_FILE" \
         --hand "$HAND" \
         --visualize
+        --realtime-wirte
 fi
 
 echo ""
