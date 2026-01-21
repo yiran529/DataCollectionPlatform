@@ -486,11 +486,14 @@ class HandCollector:
             if self._enable_realtime_write:
                 # 实时写入模式：直接加入队列，不保存到内存
                 if s_data or m_data or e_data:
-                    self._write_queue.put({
-                        'stereo': s_data,
-                        'mono': m_data,
-                        'encoder': e_data
-                    })
+                    try:
+                        self._write_queue.put({
+                            'stereo': s_data,
+                            'mono': m_data,
+                            'encoder': e_data
+                        }, timeout=1.0)  # 1秒超时避免永久阻塞
+                    except queue.Full:
+                        print(f"\n[{self.hand_name}] ⚠️ 写入队列已满，数据可能丢失")
                 
                 # 更新统计
                 if s_data:
@@ -604,6 +607,7 @@ class HandCollector:
     
     def _write_loop(self):
         """写入线程循环（批量处理队列中的数据）"""
+        print(f"[{self.hand_name}] 写入线程已启动")
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
         batch_buffer = []
         batch_size = 20  # 增大批次到20帧，减少IO次数
@@ -655,6 +659,8 @@ class HandCollector:
                 all_mono.extend(data['mono'])
                 all_encoder.extend(data['encoder'])
             
+            print(f"[{self.hand_name}] DEBUG: 批次数据 - stereo:{len(all_stereo)}, mono:{len(all_mono)}, encoder:{len(all_encoder)}")
+            
             if not all_stereo:
                 return
             
@@ -704,7 +710,10 @@ class HandCollector:
                     aligned_frames.append((s, mono, enc))
             
             if not aligned_frames:
+                print(f"[{self.hand_name}] ⚠️ 对齐后没有有效帧（可能时间戳不匹配）")
                 return
+            
+            print(f"[{self.hand_name}] DEBUG: 对齐成功 {len(aligned_frames)} 帧")
             
             # 压缩并写入
             batch_stereo_jpegs = []
@@ -741,6 +750,7 @@ class HandCollector:
             
             # 写入HDF5
             if batch_stereo_jpegs:
+                print(f"[{self.hand_name}] DEBUG: 准备写入 {len(batch_stereo_jpegs)} 帧到HDF5")
                 with self._write_lock:
                     current_size = self._h5_file['stereo_jpeg'].shape[0]
                     new_size = current_size + len(batch_stereo_jpegs)
@@ -767,11 +777,15 @@ class HandCollector:
                     self._h5_file.flush()
                     
                     self._total_written = new_size
+                    print(f"[{self.hand_name}] DEBUG: 成功写入，总帧数={self._total_written}")
                     
         except Exception as e:
-            print(f"\n[{self.hand_name}] ⚠️ 批量写入错误: {e}")
+            print(f"\n[{self.hand_name}] ❌ 批量写入错误: {type(e).__name__}: {e}")
             import traceback
+            print(f"[{self.hand_name}] 错误详情:")
             traceback.print_exc()
+            # 即使出错也要继续，不能让写入线程停止
+            return
     
     def get_current_frame(self) -> Optional[HandFrame]:
         """获取当前帧（用于实时预览，应用立体校正）"""
