@@ -88,8 +88,8 @@ class HandCollector:
         self._record_thread = None
         self._record_stats = {'frames': 0, 'last_print': 0}
         
-        # JPEG压缩质量
-        self._jpeg_quality = config.get('jpeg_quality', 85)
+        # JPEG压缩质量（降低以提升编码速度）
+        self._jpeg_quality = config.get('jpeg_quality', 75)
     
     @property
     def is_ready(self) -> bool:
@@ -513,7 +513,7 @@ class HandCollector:
         
         try:
             while self._recording:
-                time.sleep(0.01)  # 10ms轮询（更频繁）
+                time.sleep(0.001)  # 1ms轮询（高频响应）
                 
                 # 获取新帧（增量）
                 s_data = self.stereo.get_buffer()
@@ -587,8 +587,8 @@ class HandCollector:
                 if new_encoder:
                     last_encoder_idx = new_encoder[-1].idx
                 
-                # 定期刷新到磁盘
-                if self._frame_count % 10 == 0:
+                # 定期刷新到磁盘（降低频率以提升性能）
+                if self._frame_count % 50 == 0:
                     self._temp_h5_file.flush()
                 
                 # 检查帧数限制
