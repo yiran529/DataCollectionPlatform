@@ -614,10 +614,19 @@ class HandCollector:
         last_write_time = time.time()
         max_wait_time = 0.3  # 减少等待时间到0.3秒，提高响应速度
         
+        print(f"[{self.hand_name}] DEBUG: 进入主循环，_recording={self._recording}")
+        iteration_count = 0
+        
         while self._recording or not self._write_queue.empty():
+            iteration_count += 1
+            if iteration_count % 10 == 0:  # 每10次迭代打印一次
+                print(f"[{self.hand_name}] DEBUG: 循环第{iteration_count}次，队列大小={self._write_queue.qsize()}")
+            
             try:
                 # 尝试获取数据（超时0.1秒）
+                print(f"[{self.hand_name}] DEBUG: 尝试从队列获取数据...")
                 data = self._write_queue.get(timeout=0.1)
+                print(f"[{self.hand_name}] DEBUG: 成功获取数据，batch_buffer长度={len(batch_buffer)}")
                 batch_buffer.append(data)
                 
                 # 如果达到批量大小或超过最长等待时间，执行写入
@@ -625,22 +634,29 @@ class HandCollector:
                                (time.time() - last_write_time) >= max_wait_time)
                 
                 if should_write and batch_buffer:
+                    print(f"[{self.hand_name}] DEBUG: 准备调用_write_batch，batch数量={len(batch_buffer)}")
                     self._write_batch(batch_buffer, encode_params)
                     batch_buffer = []
                     last_write_time = time.time()
                     
             except queue.Empty:
                 # 队列为空，检查是否有待写入的缓存
+                if iteration_count % 10 == 0:
+                    print(f"[{self.hand_name}] DEBUG: 队列空，batch_buffer长度={len(batch_buffer)}")
                 if batch_buffer and (time.time() - last_write_time) >= max_wait_time:
+                    print(f"[{self.hand_name}] DEBUG: 超时，写入剩余batch")
                     self._write_batch(batch_buffer, encode_params)
                     batch_buffer = []
                     last_write_time = time.time()
                 continue
             except Exception as e:
                 print(f"\n[{self.hand_name}] ⚠️ 写入线程错误: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         # 写入剩余数据
+        print(f"[{self.hand_name}] DEBUG: 退出主循环，写入剩余数据")
         if batch_buffer:
             self._write_batch(batch_buffer, encode_params)
     
