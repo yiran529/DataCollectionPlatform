@@ -621,7 +621,7 @@ class HandCollector:
         last_write_time = time.time()
         max_wait_time = 0.3  # 减少等待时间到0.3秒，提高响应速度
         
-        print(f"[{self.hand_name}] DEBUG: 进入主循环，_recording={self._recording}")
+        # print(f"[{self.hand_name}] DEBUG: 进入主循环，_recording={self._recording}")
         iteration_count = 0
         
         while self._recording or not self._write_queue.empty():
@@ -648,10 +648,10 @@ class HandCollector:
                     
             except queue.Empty:
                 # 队列为空，检查是否有待写入的缓存
-                if iteration_count % 10 == 0:
-                    print(f"[{self.hand_name}] DEBUG: 队列空，batch_buffer长度={len(batch_buffer)}")
+                # if iteration_count % 10 == 0:
+                #     print(f"[{self.hand_name}] DEBUG: 队列空，batch_buffer长度={len(batch_buffer)}")
                 if batch_buffer and (time.time() - last_write_time) >= max_wait_time:
-                    print(f"[{self.hand_name}] DEBUG: 超时，写入剩余batch")
+                    # print(f"[{self.hand_name}] DEBUG: 超时，写入剩余batch")
                     self._write_batch(batch_buffer, encode_params)
                     batch_buffer = []
                     last_write_time = time.time()
@@ -663,7 +663,7 @@ class HandCollector:
                 continue
         
         # 写入剩余数据
-        print(f"[{self.hand_name}] DEBUG: 退出主循环，写入剩余数据")
+        # print(f"[{self.hand_name}] DEBUG: 退出主循环，写入剩余数据")
         if batch_buffer:
             self._write_batch(batch_buffer, encode_params)
     
@@ -736,7 +736,7 @@ class HandCollector:
                 print(f"[{self.hand_name}] ⚠️ 对齐后没有有效帧（可能时间戳不匹配）")
                 return
             
-            print(f"[{self.hand_name}] DEBUG: 对齐成功 {len(aligned_frames)} 帧")
+            # print(f"[{self.hand_name}] DEBUG: 对齐成功 {len(aligned_frames)} 帧")
             
             # 压缩并写入
             batch_stereo_jpegs = []
@@ -773,7 +773,7 @@ class HandCollector:
             
             # 写入HDF5
             if batch_stereo_jpegs:
-                print(f"[{self.hand_name}] DEBUG: 准备写入 {len(batch_stereo_jpegs)} 帧到HDF5")
+                # print(f"[{self.hand_name}] DEBUG: 准备写入 {len(batch_stereo_jpegs)} 帧到HDF5")
                 with self._write_lock:
                     current_size = self._h5_file['stereo_jpeg'].shape[0]
                     new_size = current_size + len(batch_stereo_jpegs)
@@ -800,7 +800,7 @@ class HandCollector:
                     self._h5_file.flush()
                     
                     self._total_written = new_size
-                    print(f"[{self.hand_name}] DEBUG: 成功写入，总帧数={self._total_written}")
+                    # print(f"[{self.hand_name}] DEBUG: 成功写入，总帧数={self._total_written}")
                     
         except Exception as e:
             print(f"\n[{self.hand_name}] ❌ 批量写入错误: {type(e).__name__}: {e}")
