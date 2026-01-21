@@ -537,13 +537,13 @@ class HandCollector:
                     if not success:
                         continue
                     
-                    # 转换为bytes（vlen数据集需要）
-                    jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8).tobytes()
+                    # 转换为1D numpy array（vlen数据集可以直接接受）
+                    jpeg_array = jpeg_data.flatten()
                     
                     # 流式追加到HDF5
                     with self._record_lock:
                         stereo_ds.resize((stereo_ds.shape[0] + 1,))
-                        stereo_ds[-1] = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                        stereo_ds[-1] = jpeg_array
                         
                         stereo_ts_ds.resize((stereo_ts_ds.shape[0] + 1,))
                         stereo_ts_ds[-1] = frame.timestamp
@@ -552,23 +552,23 @@ class HandCollector:
                         self._record_stats['frames'] = self._frame_count
                     
                     # 立即释放内存
-                    del rectified, jpeg_bytes, jpeg_data
+                    del rectified, jpeg_array, jpeg_data
                 
                 # 处理mono帧
                 for frame in new_mono:
                     success, jpeg_data = cv2.imencode('.jpg', frame.data, encode_params)
                     if success:
-                        # 转换为bytes（vlen数据集需要）
-                        jpeg_bytes = np.asarray(jpeg_data, dtype=np.uint8).tobytes()
+                        # 转换为1D numpy array（vlen数据集可以直接接受）
+                        jpeg_array = jpeg_data.flatten()
                         
                         with self._record_lock:
                             mono_ds.resize((mono_ds.shape[0] + 1,))
-                            mono_ds[-1] = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+                            mono_ds[-1] = jpeg_array
                             
                             mono_ts_ds.resize((mono_ts_ds.shape[0] + 1,))
                             mono_ts_ds[-1] = frame.timestamp
                         
-                        del jpeg_bytes, jpeg_data
+                        del jpeg_array, jpeg_data
                 
                 # 处理encoder数据
                 for frame in new_encoder:
@@ -654,8 +654,16 @@ class HandCollector:
         finally:
             # 关闭临时文件
             if self._temp_h5_file:
-                self._temp_h5_file.close()
-                print(f"\n[{self.hand_name}] 临时文件已关闭")
+                try:
+                    # 最终刷新
+                    print(f"\n[{self.hand_name}] 正在刷新数据到磁盘...")
+                    self._temp_h5_file.flush()
+                    self._temp_h5_file.close()
+                    print(f"[{self.hand_name}] ✓ 临时文件已关闭: {self._temp_h5_path}")
+                except Exception as e:
+                    print(f"[{self.hand_name}] ⚠️ 关闭文件时出错: {e}")
+                finally:
+                    self._temp_h5_file = None
     
     def get_current_frame(self) -> Optional[HandFrame]:
         """获取当前帧（用于实时预览）"""
@@ -745,27 +753,25 @@ class HandCollector:
         
         print(f"\n[{self.hand_name}] 停止录制...")
         self._recording = False
+        
+        # 等待录制线程结束
         if self._record_thread:
             self._record_thread.join(timeout=5)
         
-        # 关闭HDF5文件
-        with self._record_lock:
-            if self._temp_h5_file:
-                try:
-                    # 统计信息
-                    n_stereo = self._temp_h5_file['stereo_jpeg'].shape[0] if 'stereo_jpeg' in self._temp_h5_file else 0
-                    n_mono = self._temp_h5_file['mono_jpeg'].shape[0] if 'mono_jpeg' in self._temp_h5_file else 0
-                    n_encoder = self._temp_h5_file['encoder_angles'].shape[0] if 'encoder_angles' in self._temp_h5_file else 0
+        # 返回临时文件路径（文件已在_record_loop的finally中关闭）
+        if self._temp_h5_path and os.path.exists(self._temp_h5_path):
+            # 统计信息（重新打开文件读取）
+            try:
+                with h5py.File(self._temp_h5_path, 'r') as f:
+                    n_stereo = f['stereo_jpeg'].shape[0] if 'stereo_jpeg' in f else 0
+                    n_mono = f['mono_jpeg'].shape[0] if 'mono_jpeg' in f else 0
+                    n_encoder = f['encoder_angles'].shape[0] if 'encoder_angles' in f else 0
                     
                     record_duration = time.time() - self._record_start_ts
                     stereo_fps = n_stereo / record_duration if record_duration > 0 else 0
                     mono_fps = n_mono / record_duration if record_duration > 0 else 0
                     
-                    # 获取文件大小
-                    temp_path = self._temp_h5_path
-                    file_size_mb = 0
-                    if os.path.exists(temp_path):
-                        file_size_mb = os.path.getsize(temp_path) / 1024 / 1024
+                    file_size_mb = os.path.getsize(self._temp_h5_path) / 1024 / 1024
                     
                     print(f"[{self.hand_name}] 录制完成:")
                     print(f"  - 双目: {n_stereo}帧 ({stereo_fps:.2f} fps)")
@@ -774,16 +780,13 @@ class HandCollector:
                     print(f"  - 时长: {record_duration:.2f}秒")
                     print(f"  - 文件大小: {file_size_mb:.1f} MB")
                     
-                    self._temp_h5_file.close()
-                    self._temp_h5_file = None
-                    
-                    return temp_path
-                    
-                except Exception as e:
-                    print(f"[{self.hand_name}] 警告: 关闭临时HDF5文件时出错: {e}")
-                    self._temp_h5_file = None
-                    return ""
-            
+                    return self._temp_h5_path
+            except Exception as e:
+                print(f"[{self.hand_name}] ⚠️ 读取录制统计信息失败: {e}")
+                # 即使统计失败，也返回文件路径
+                return self._temp_h5_path
+        else:
+            print(f"[{self.hand_name}] ❌ 临时文件不存在或路径为空")
             return ""
     
     def align_and_get_indices(self, max_time_diff_ms: float = 200.0) -> List[Tuple[int, int, int]]:
