@@ -44,18 +44,7 @@ except ImportError:
     HAS_PSUTIL = False
 
 
-@dataclass
-class HandFrame:
-    """单手的同步帧"""
-    stereo: np.ndarray
-    mono: np.ndarray
-    angle: float
-    timestamp: float
-    stereo_ts: float
-    mono_ts: float
-    encoder_ts: float
-    idx: int
-
+from hand_collector import HandCollector, HandFrame, visualize_hand
 
 @dataclass
 class DualHandFrame:
@@ -972,121 +961,6 @@ def save_dual_hand_data(data: List[DualHandFrame], output_dir: str,
     print(f"✅ 保存完成: {filepath}")
     
     return filepath
-
-
-def visualize_hand(collector: HandCollector, hand_name: str):
-    """可视化单手数据"""
-    print(f"\n[{hand_name}] 开始可视化（按 'q' 退出）...")
-    
-    window_name = f"{hand_name} Hand - Press 'q' to quit"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    
-    angle_history = []
-    max_history = 100
-    
-    try:
-        while True:
-            frame = collector.get_current_frame()
-            
-            if frame is None:
-                time.sleep(0.01)
-                continue
-            
-            # 获取图像
-            stereo_img = frame.stereo.copy()
-            mono_img = frame.mono.copy()
-            angle = frame.angle
-            
-            # 更新角度历史
-            angle_history.append(angle)
-            if len(angle_history) > max_history:
-                angle_history.pop(0)
-            
-            # 分割双目图像（假设是左右拼接的）
-            stereo_h, stereo_w = stereo_img.shape[:2]
-            if stereo_w > stereo_h:
-                # 水平拼接：左右
-                left_img = stereo_img[:, :stereo_w//2]
-                right_img = stereo_img[:, stereo_w//2:]
-            else:
-                # 垂直拼接：上下
-                left_img = stereo_img[:stereo_h//2, :]
-                right_img = stereo_img[stereo_h//2:, :]
-            
-            # 保持原始尺寸，不进行resize
-            mono_display = mono_img.copy()
-            left_display = left_img.copy()
-            right_display = right_img.copy()
-            
-            # 创建角度显示图像（高度与mono_display匹配）
-            angle_img = np.zeros((mono_display.shape[0], 400, 3), dtype=np.uint8)
-            
-            # 绘制当前角度
-            angle_text = f"Angle: {angle:.2f}°"
-            cv2.putText(angle_img, angle_text, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            
-            # 绘制角度历史曲线
-            if len(angle_history) > 1:
-                points = []
-                angle_img_h = angle_img.shape[0]
-                angle_img_w = angle_img.shape[1]
-                for i, a in enumerate(angle_history):
-                    x = int((i / max(len(angle_history) - 1, 1)) * (angle_img_w - 20) + 10)
-                    # 角度范围假设是-180到180，映射到图像高度
-                    y = int(angle_img_h - 20 - (a + 180) / 360 * (angle_img_h - 40))
-                    points.append((x, y))
-                
-                for i in range(len(points) - 1):
-                    cv2.line(angle_img, points[i], points[i+1], (0, 255, 255), 2)
-            
-            # 组合显示图像
-            # 上排：双目左右
-            stereo_row = np.hstack([left_display, right_display])
-            
-            # 下排：单目和角度
-            bottom_row = np.hstack([mono_display, angle_img])
-            
-            # 如果宽度不一致，用黑色填充较小的图像
-            if stereo_row.shape[1] != bottom_row.shape[1]:
-                target_width = max(stereo_row.shape[1], bottom_row.shape[1])
-                if stereo_row.shape[1] < target_width:
-                    # 在右侧填充黑色
-                    padding = np.zeros((stereo_row.shape[0], target_width - stereo_row.shape[1], 3), dtype=np.uint8)
-                    stereo_row = np.hstack([stereo_row, padding])
-                if bottom_row.shape[1] < target_width:
-                    # 在右侧填充黑色
-                    padding = np.zeros((bottom_row.shape[0], target_width - bottom_row.shape[1], 3), dtype=np.uint8)
-                    bottom_row = np.hstack([bottom_row, padding])
-            
-            display = np.vstack([stereo_row, bottom_row])
-            
-            # 添加标题
-            title_height = 30
-            title_img = np.zeros((title_height, display.shape[1], 3), dtype=np.uint8)
-            title_text = f"{hand_name} Hand - Stereo (Left/Right) | Mono | Angle"
-            cv2.putText(title_img, title_text, (10, 20), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-            display = np.vstack([title_img, display])
-            
-            # 显示FPS和时间戳
-            fps_text = f"FPS: {1.0 / (time.time() - getattr(visualize_hand, 'last_time', time.time())):.1f}"
-            cv2.putText(display, fps_text, (10, display.shape[0] - 10), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            visualize_hand.last_time = time.time()
-            
-            cv2.imshow(window_name, display)
-            
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            
-            time.sleep(0.01)
-    
-    except KeyboardInterrupt:
-        pass
-    finally:
-        cv2.destroyWindow(window_name)
 
 
 def visualize_dual_hand(collector: DualHandCollector):

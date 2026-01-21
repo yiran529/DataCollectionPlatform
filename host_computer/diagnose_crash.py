@@ -115,10 +115,10 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# 测试9: 导入 dual_hand_collector
-print("\n[9/10] 测试导入 dual_hand_collector...")
+# 测试9: 导入 hand_collector
+print("\n[9/10] 测试导入 hand_collector...")
 try:
-    from dual_hand_collector import HandCollector, HandFrame, visualize_hand
+    from hand_collector import HandCollector, HandFrame, visualize_hand
     print("  ✓ dual_hand_collector 导入正常")
 except Exception as e:
     print(f"  ✗ dual_hand_collector 错误: {e}")
