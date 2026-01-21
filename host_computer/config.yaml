@@ -136,13 +136,13 @@ left_hand:
 right_hand:
   mono:
     device: 1
-    width: 1600
-    height: 1300
+    width: 640
+    height: 480
     fps: 30
   stereo:
     device: 0
-    width: 3840
-    height: 1080
+    width: 1280
+    height: 480
     fps: 30
     calibration_file: stereo_calibration/right/stereo_calibration_right.json
     calibration:

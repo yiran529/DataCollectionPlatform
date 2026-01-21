@@ -173,8 +173,8 @@ if __name__ == "__main__":
                        help="启用可视化模式")
     parser.add_argument("--record", "-r", action="store_true",
                        help="录制模式（与可视化模式互斥）")
-    # parser.add_argument("--realtime-write", action="store_true", default=True, 
-    #                    help="启用实时写入模式（录制时直接写入磁盘，避免OOM）")
+    parser.add_argument("--realtime-write", action="store_true", default=True, 
+                       help="启用实时写入模式（录制时直接写入磁盘，避免OOM）")
     args = parser.parse_args()
     
     config_path = args.config
