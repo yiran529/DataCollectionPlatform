@@ -173,6 +173,8 @@ if __name__ == "__main__":
                        help="启用可视化模式")
     parser.add_argument("--record", "-r", action="store_true",
                        help="录制模式（与可视化模式互斥）")
+    parser.add_argument("--realtime-write", action="store_true",
+                       help="启用实时写入模式（录制时直接写入磁盘，避免OOM）")
     args = parser.parse_args()
     
     config_path = args.config
@@ -197,8 +199,19 @@ if __name__ == "__main__":
             print(f"❌ 配置文件中没有找到 {args.hand}_hand 配置")
             sys.exit(1)
         
-        # 创建收集器
-        collector = HandCollector(hand_config, hand_name)
+        # 获取保存配置
+        save_cfg = config.get('save', {})
+        output_dir = save_cfg.get('output_dir', './data')
+        jpeg_quality = save_cfg.get('jpeg_quality', 85)
+        
+        # 创建收集器（支持实时写入）
+        collector = HandCollector(
+            hand_config, 
+            hand_name,
+            enable_realtime_write=args.realtime_write,
+            output_dir=output_dir,
+            jpeg_quality=jpeg_quality
+        )
         collector.start()
         
         if not collector.wait_ready():
@@ -217,19 +230,23 @@ if __name__ == "__main__":
         
         elif args.record:
             # 录制模式
-            print(f"\n[{hand_name}] 按回车键开始录制...")
+            mode_text = "实时写入" if args.realtime_write else "内存缓存"
+            print(f"\n[{hand_name}] 按回车键开始录制（{mode_text}模式）...")
             input()
             collector.start_recording()
             print(f"[{hand_name}] 录制中... 按回车键停止录制")
             input()
-            data = collector.stop_recording()
+            result = collector.stop_recording()
             
-            if data:
-                print(f"\n[{hand_name}] 录制完成: {len(data)} 帧")
-                save_cfg = config.get('save', {})
-                output_dir = save_cfg.get('output_dir', './data')
-                jpeg_quality = save_cfg.get('jpeg_quality', 85)
-                save_single_hand_data(data, hand_name, output_dir, jpeg_quality)
+            if args.realtime_write:
+                # 实时写入模式：返回文件路径
+                if result:
+                    print(f"\n[{hand_name}] ✅ 数据已保存到: {result}")
+            else:
+                # 内存模式：返回数据列表，需要保存
+                if result:
+                    print(f"\n[{hand_name}] 录制完成: {len(result)} 帧")
+                    save_single_hand_data(result, hand_name, output_dir, jpeg_quality)
         
         collector.stop()
         

@@ -7,9 +7,11 @@ import threading
 import yaml
 import json
 import glob
+import queue
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Tuple
 from collections import deque
+from datetime import datetime
 
 # 添加父目录到路径，以便导入sync_data_collector
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,7 +49,8 @@ class HandFrame:
 class HandCollector:
     """单手数据收集器（复用单手的同步逻辑）"""
     
-    def __init__(self, config: dict, hand_name: str):
+    def __init__(self, config: dict, hand_name: str, enable_realtime_write: bool = False,
+                 output_dir: str = './data', jpeg_quality: int = 85):
         self.config = config
         self.hand_name = hand_name
         
@@ -71,7 +74,7 @@ class HandCollector:
         self.stereo_map2_r = None
         self.stereo_calibration = None
         
-        # 录制数据
+        # 录制数据（内存模式）
         self._record_start_ts = 0
         self._recorded_stereo: List[SensorFrame] = []
         self._recorded_mono: List[SensorFrame] = []
@@ -79,6 +82,17 @@ class HandCollector:
         self._record_lock = threading.Lock()
         self._record_thread = None
         self._record_stats = {'frames': 0, 'last_print': 0}
+        
+        # 实时写入模式
+        self._enable_realtime_write = enable_realtime_write
+        self._output_dir = output_dir
+        self._jpeg_quality = jpeg_quality
+        self._h5_file = None
+        self._h5_filepath = None
+        self._write_queue = None
+        self._write_thread = None
+        self._write_lock = threading.Lock()
+        self._total_written = 0
     
     @property
     def is_ready(self) -> bool:
@@ -428,6 +442,7 @@ class HandCollector:
             self._recorded_mono = []
             self._recorded_encoder = []
             self._record_stats = {'frames': 0, 'last_print': time.time()}
+            self._total_written = 0
         
         self.stereo.clear_buffer()
         self.mono.clear_buffer()
@@ -435,6 +450,13 @@ class HandCollector:
             self.encoder.clear_buffer()
         
         self._record_start_ts = time.time()
+        
+        # 如果启用实时写入，初始化HDF5文件和写入线程
+        if self._enable_realtime_write:
+            if not self._init_realtime_write():
+                print(f"[{self.hand_name}] ❌ 实时写入初始化失败")
+                return False
+        
         self._recording = True
         
         self._record_thread = threading.Thread(target=self._record_loop, daemon=True)
@@ -443,7 +465,7 @@ class HandCollector:
         return True
     
     def _record_loop(self):
-        """录制循环（参考树莓派版本的实现）"""
+        """录制循环（支持实时写入或内存缓存）"""
         import os
         
         process = None
@@ -455,54 +477,275 @@ class HandCollector:
                 pass
         
         while self._recording:
-            time.sleep(0.1)  # 与树莓派版本保持一致：0.1秒
+            time.sleep(0.1)  # 0.1秒采集周期
             
             s_data = self.stereo.get_buffer()
             m_data = self.mono.get_buffer()
             e_data = self.encoder.get_buffer() if self.encoder else []
             
-            # 直接记录所有数据，不添加条件判断（参考树莓派版本）
-            with self._record_lock:
-                self._recorded_stereo.extend(s_data)
-                self._recorded_mono.extend(m_data)
-                self._recorded_encoder.extend(e_data)
+            if self._enable_realtime_write:
+                # 实时写入模式：直接加入队列，不保存到内存
+                if s_data or m_data or e_data:
+                    self._write_queue.put({
+                        'stereo': s_data,
+                        'mono': m_data,
+                        'encoder': e_data
+                    })
                 
-                # 更新统计信息
+                # 更新统计
                 if s_data:
-                    self._record_stats['frames'] += len(s_data)
-                
-                # 每1秒打印一次进度
-                now = time.time()
-                if now - self._record_stats['last_print'] >= 1.0:
-                    elapsed = now - self._record_start_ts
-                    fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
+                    with self._record_lock:
+                        self._record_stats['frames'] += len(s_data)
+            else:
+                # 内存模式：保存到列表（原有逻辑）
+                with self._record_lock:
+                    self._recorded_stereo.extend(s_data)
+                    self._recorded_mono.extend(m_data)
+                    self._recorded_encoder.extend(e_data)
                     
-                    # 检查内存使用
-                    if process:
-                        try:
-                            mem_info = process.memory_info()
-                            mem_mb = mem_info.rss / (1024 * 1024)
-                            mem_gb = mem_mb / 1024
-                            
-                            if mem_info.rss > memory_warning_threshold:
-                                print(f"\n[{self.hand_name}] ⚠️ 内存使用较高: {mem_gb:.1f}GB ({mem_mb:.0f}MB)")
-                            
+                    if s_data:
+                        self._record_stats['frames'] += len(s_data)
+            
+            # 每1秒打印一次进度
+            now = time.time()
+            if now - self._record_stats['last_print'] >= 1.0:
+                elapsed = now - self._record_start_ts
+                fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
+                
+                # 检查内存使用和队列大小
+                queue_size = self._write_queue.qsize() if self._enable_realtime_write else 0
+                
+                if process:
+                    try:
+                        mem_info = process.memory_info()
+                        mem_mb = mem_info.rss / (1024 * 1024)
+                        mem_gb = mem_mb / 1024
+                        
+                        if mem_info.rss > memory_warning_threshold:
+                            print(f"\n[{self.hand_name}] ⚠️ 内存使用较高: {mem_gb:.1f}GB")
+                        
+                        if self._enable_realtime_write:
+                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 已写入:{self._total_written}, 队列:{queue_size}, {mem_gb:.1f}GB)", end='\r')
+                        else:
                             encoder_count = len(self._recorded_encoder)
-                            print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f} fps, {encoder_count} encoder, {mem_gb:.1f}GB)", end='\r')
-                        except:
+                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, {encoder_count} encoder, {mem_gb:.1f}GB)", end='\r')
+                    except:
+                        if self._enable_realtime_write:
+                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 已写入:{self._total_written}, 队列:{queue_size})", end='\r')
+                        else:
                             encoder_count = len(self._recorded_encoder)
-                            print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f} fps, {encoder_count} encoder)", end='\r')
+                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, {encoder_count} encoder)", end='\r')
+                else:
+                    if self._enable_realtime_write:
+                        print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 已写入:{self._total_written}, 队列:{queue_size})", end='\r')
                     else:
                         encoder_count = len(self._recorded_encoder)
-                        print(f"[{self.hand_name}] 录制中: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f} fps, {encoder_count} encoder)", end='\r')
-                    
-                    self._record_stats['last_print'] = now
+                        print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, {encoder_count} encoder)", end='\r')
+                
+                self._record_stats['last_print'] = now
             
-            # 清空缓冲区（与树莓派版本保持一致）
+            # 清空缓冲区
             self.stereo.clear_buffer()
             self.mono.clear_buffer()
             if self.encoder:
                 self.encoder.clear_buffer()
+    
+    def _init_realtime_write(self) -> bool:
+        """初始化实时写入HDF5"""
+        if not HAS_H5PY:
+            print(f"[{self.hand_name}] ❌ h5py未安装，无法使用实时写入")
+            return False
+        
+        try:
+            # 创建输出目录
+            os.makedirs(self._output_dir, exist_ok=True)
+            
+            # 生成文件名
+            prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
+            hand_lower = self.hand_name.lower()
+            filename = f"{prefix}_{hand_lower}_hand_data.h5"
+            self._h5_filepath = os.path.join(self._output_dir, filename)
+            
+            # 创建HDF5文件
+            self._h5_file = h5py.File(self._h5_filepath, 'w', libver='latest')
+            
+            # 写入元数据（图像尺寸在第一帧到达时设置）
+            self._h5_file.attrs['hand'] = hand_lower
+            self._h5_file.attrs['jpeg_quality'] = self._jpeg_quality
+            self._h5_file.attrs['created_at'] = datetime.now().isoformat()
+            self._h5_file.attrs['realtime_write'] = True
+            
+            # 创建可变长度数据集
+            dt = h5py.special_dtype(vlen=np.uint8)
+            self._h5_file.create_dataset('stereo_jpeg', (0,), dtype=dt, maxshape=(None,))
+            self._h5_file.create_dataset('mono_jpeg', (0,), dtype=dt, maxshape=(None,))
+            
+            # 创建固定长度数据集
+            self._h5_file.create_dataset('angles', (0,), dtype=np.float32, maxshape=(None,))
+            self._h5_file.create_dataset('timestamps', (0,), dtype=np.float64, maxshape=(None,))
+            self._h5_file.create_dataset('stereo_timestamps', (0,), dtype=np.float64, maxshape=(None,))
+            self._h5_file.create_dataset('mono_timestamps', (0,), dtype=np.float64, maxshape=(None,))
+            self._h5_file.create_dataset('encoder_timestamps', (0,), dtype=np.float64, maxshape=(None,))
+            
+            # 创建写入队列和线程
+            self._write_queue = queue.Queue(maxsize=50)  # 限制队列大小，避免内存累积
+            self._write_thread = threading.Thread(target=self._write_loop, daemon=True)
+            self._write_thread.start()
+            
+            print(f"[{self.hand_name}] ✓ 实时写入已启用: {self._h5_filepath}")
+            return True
+            
+        except Exception as e:
+            print(f"[{self.hand_name}] ❌ 实时写入初始化失败: {e}")
+            if self._h5_file:
+                self._h5_file.close()
+                self._h5_file = None
+            return False
+    
+    def _write_loop(self):
+        """写入线程循环（批量处理队列中的数据）"""
+        encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
+        batch_buffer = []
+        batch_size = 10  # 每批处理10帧
+        last_write_time = time.time()
+        max_wait_time = 0.5  # 最长等待0.5秒就写入（即使不满一批）
+        
+        while self._recording or not self._write_queue.empty():
+            try:
+                # 尝试获取数据（超时0.1秒）
+                data = self._write_queue.get(timeout=0.1)
+                batch_buffer.append(data)
+                
+                # 如果达到批量大小或超过最长等待时间，执行写入
+                should_write = (len(batch_buffer) >= batch_size or 
+                               (time.time() - last_write_time) >= max_wait_time)
+                
+                if should_write and batch_buffer:
+                    self._write_batch(batch_buffer, encode_params)
+                    batch_buffer = []
+                    last_write_time = time.time()
+                    
+            except queue.Empty:
+                # 队列为空，检查是否有待写入的缓存
+                if batch_buffer and (time.time() - last_write_time) >= max_wait_time:
+                    self._write_batch(batch_buffer, encode_params)
+                    batch_buffer = []
+                    last_write_time = time.time()
+                continue
+            except Exception as e:
+                print(f"\n[{self.hand_name}] ⚠️ 写入线程错误: {e}")
+                continue
+        
+        # 写入剩余数据
+        if batch_buffer:
+            self._write_batch(batch_buffer, encode_params)
+    
+    def _write_batch(self, batch_buffer: list, encode_params: list):
+        """批量写入数据到HDF5"""
+        try:
+            # 收集并对齐所有批次数据
+            all_stereo = []
+            all_mono = []
+            all_encoder = []
+            
+            for data in batch_buffer:
+                all_stereo.extend(data['stereo'])
+                all_mono.extend(data['mono'])
+                all_encoder.extend(data['encoder'])
+            
+            if not all_stereo:
+                return
+            
+            # 对齐数据
+            aligned_frames = []
+            for s in all_stereo:
+                mono_target = s.timestamp - self.stereo_mono_offset_ms / 1000.0
+                encoder_target = s.timestamp - self.stereo_encoder_offset_ms / 1000.0
+                
+                mono = None
+                if all_mono:
+                    best = min(all_mono, key=lambda x: abs(x.timestamp - mono_target))
+                    if abs(best.timestamp - mono_target) * 1000 <= 200.0:  # 200ms容限
+                        mono = best
+                
+                enc = None
+                if all_encoder:
+                    best = min(all_encoder, key=lambda x: abs(x.timestamp - encoder_target))
+                    if abs(best.timestamp - encoder_target) * 1000 <= 200.0:
+                        enc = best
+                
+                if mono:
+                    aligned_frames.append((s, mono, enc))
+            
+            if not aligned_frames:
+                return
+            
+            # 压缩并写入
+            batch_stereo_jpegs = []
+            batch_mono_jpegs = []
+            batch_angles = []
+            batch_timestamps = []
+            batch_stereo_ts = []
+            batch_mono_ts = []
+            batch_encoder_ts = []
+            
+            for s, mono, enc in aligned_frames:
+                # 应用立体校正
+                stereo_rectified = self._rectify_stereo(s.data)
+                
+                # 压缩图像
+                success_s, s_jpeg = cv2.imencode('.jpg', stereo_rectified, encode_params)
+                success_m, m_jpeg = cv2.imencode('.jpg', mono.data, encode_params)
+                
+                if not (success_s and success_m):
+                    continue
+                
+                batch_stereo_jpegs.append(np.asarray(s_jpeg, dtype=np.uint8))
+                batch_mono_jpegs.append(np.asarray(m_jpeg, dtype=np.uint8))
+                batch_angles.append(enc.data if enc else 0.0)
+                batch_timestamps.append(s.timestamp)
+                batch_stereo_ts.append(s.timestamp)
+                batch_mono_ts.append(mono.timestamp)
+                batch_encoder_ts.append(enc.timestamp if enc else s.timestamp)
+                
+                # 设置图像尺寸元数据（第一次）
+                if 'stereo_shape' not in self._h5_file.attrs:
+                    self._h5_file.attrs['stereo_shape'] = stereo_rectified.shape
+                    self._h5_file.attrs['mono_shape'] = mono.data.shape
+            
+            # 写入HDF5
+            if batch_stereo_jpegs:
+                with self._write_lock:
+                    current_size = self._h5_file['stereo_jpeg'].shape[0]
+                    new_size = current_size + len(batch_stereo_jpegs)
+                    
+                    # 扩展数据集
+                    self._h5_file['stereo_jpeg'].resize((new_size,))
+                    self._h5_file['mono_jpeg'].resize((new_size,))
+                    self._h5_file['angles'].resize((new_size,))
+                    self._h5_file['timestamps'].resize((new_size,))
+                    self._h5_file['stereo_timestamps'].resize((new_size,))
+                    self._h5_file['mono_timestamps'].resize((new_size,))
+                    self._h5_file['encoder_timestamps'].resize((new_size,))
+                    
+                    # 写入数据
+                    self._h5_file['stereo_jpeg'][current_size:new_size] = batch_stereo_jpegs
+                    self._h5_file['mono_jpeg'][current_size:new_size] = batch_mono_jpegs
+                    self._h5_file['angles'][current_size:new_size] = batch_angles
+                    self._h5_file['timestamps'][current_size:new_size] = batch_timestamps
+                    self._h5_file['stereo_timestamps'][current_size:new_size] = batch_stereo_ts
+                    self._h5_file['mono_timestamps'][current_size:new_size] = batch_mono_ts
+                    self._h5_file['encoder_timestamps'][current_size:new_size] = batch_encoder_ts
+                    
+                    # 刷新到磁盘
+                    self._h5_file.flush()
+                    
+                    self._total_written = new_size
+                    
+        except Exception as e:
+            print(f"\n[{self.hand_name}] ⚠️ 批量写入错误: {e}")
+            import traceback
+            traceback.print_exc()
     
     def get_current_frame(self) -> Optional[HandFrame]:
         """获取当前帧（用于实时预览，应用立体校正）"""
@@ -540,44 +783,66 @@ class HandCollector:
             idx=0
         )
     
-    def stop_recording(self) -> List[HandFrame]:
-        """停止录制并返回对齐的数据（分批处理优化内存）"""
+    def stop_recording(self):
+        """停止录制并返回对齐的数据或文件路径"""
         if not self._recording:
-            return []
+            return [] if not self._enable_realtime_write else None
         
         print(f"\n[{self.hand_name}] 停止录制，处理数据...")
         self._recording = False
+        
         if self._record_thread:
             self._record_thread.join(timeout=2)
         
-        # 收集最后的数据（参考树莓派版本的实现）
-        s_data = self.stereo.get_buffer()
-        m_data = self.mono.get_buffer()
-        e_data = self.encoder.get_buffer() if self.encoder else []
-        
-        with self._record_lock:
-            # 添加最后的数据
-            self._recorded_stereo.extend(s_data)
-            self._recorded_mono.extend(m_data)
-            self._recorded_encoder.extend(e_data)
+        if self._enable_realtime_write:
+            # 实时写入模式：等待写入线程完成
+            print(f"[{self.hand_name}] 等待写入线程完成...")
+            if self._write_thread:
+                self._write_thread.join(timeout=10)
             
-            # 复制数据
-            stereo_data = list(self._recorded_stereo)
-            mono_data = list(self._recorded_mono)
-            encoder_data = list(self._recorded_encoder)
-        
-        print(f"[{self.hand_name}] 原始数据: {len(stereo_data)} stereo, {len(mono_data)} mono, {len(encoder_data)} encoder")
-        
-        # 分批对齐数据（优化内存使用）
-        # 使用较宽松的时间差容限（200ms）以适应不同帧率
-        aligned = self._align_data_batch(stereo_data, mono_data, encoder_data, max_time_diff_ms=200.0)
-        
-        # 清理原始数据，释放内存
-        del stereo_data, mono_data, encoder_data
-        
-        print(f"[{self.hand_name}] 对齐后: {len(aligned)} 帧")
-        
-        return aligned
+            # 更新帧数元数据
+            if self._h5_file:
+                with self._write_lock:
+                    n_frames = self._h5_file['stereo_jpeg'].shape[0]
+                    self._h5_file.attrs['n_frames'] = n_frames
+                    
+                    file_size = os.path.getsize(self._h5_filepath) / (1024 * 1024)
+                    print(f"[{self.hand_name}] ✓ 保存完成: {self._h5_filepath}")
+                    print(f"[{self.hand_name}]   帧数: {n_frames}")
+                    print(f"[{self.hand_name}]   文件大小: {file_size:.1f}MB")
+                    
+                    self._h5_file.close()
+                    self._h5_file = None
+            
+            return self._h5_filepath
+        else:
+            # 内存模式：原有逻辑
+            s_data = self.stereo.get_buffer()
+            m_data = self.mono.get_buffer()
+            e_data = self.encoder.get_buffer() if self.encoder else []
+            
+            with self._record_lock:
+                # 添加最后的数据
+                self._recorded_stereo.extend(s_data)
+                self._recorded_mono.extend(m_data)
+                self._recorded_encoder.extend(e_data)
+                
+                # 复制数据
+                stereo_data = list(self._recorded_stereo)
+                mono_data = list(self._recorded_mono)
+                encoder_data = list(self._recorded_encoder)
+            
+            print(f"[{self.hand_name}] 原始数据: {len(stereo_data)} stereo, {len(mono_data)} mono, {len(encoder_data)} encoder")
+            
+            # 分批对齐数据（优化内存使用）
+            aligned = self._align_data_batch(stereo_data, mono_data, encoder_data, max_time_diff_ms=200.0)
+            
+            # 清理原始数据，释放内存
+            del stereo_data, mono_data, encoder_data
+            
+            print(f"[{self.hand_name}] 对齐后: {len(aligned)} 帧")
+            
+            return aligned
     
     def _align_data(self, stereo_data: List[SensorFrame], 
                    mono_data: List[SensorFrame],
