@@ -626,14 +626,14 @@ class HandCollector:
         
         while self._recording or not self._write_queue.empty():
             iteration_count += 1
-            if iteration_count % 10 == 0:  # 每10次迭代打印一次
-                print(f"[{self.hand_name}] DEBUG: 循环第{iteration_count}次，队列大小={self._write_queue.qsize()}")
+            # if iteration_count % 10 == 0:  # 每10次迭代打印一次
+            #     print(f"[{self.hand_name}] DEBUG: 循环第{iteration_count}次，队列大小={self._write_queue.qsize()}")
             
             try:
                 # 尝试获取数据（超时0.1秒）
-                print(f"[{self.hand_name}] DEBUG: 尝试从队列获取数据...")
+                # print(f"[{self.hand_name}] DEBUG: 尝试从队列获取数据...")
                 data = self._write_queue.get(timeout=0.1)
-                print(f"[{self.hand_name}] DEBUG: 成功获取数据，batch_buffer长度={len(batch_buffer)}")
+                # print(f"[{self.hand_name}] DEBUG: 成功获取数据，batch_buffer长度={len(batch_buffer)}")
                 batch_buffer.append(data)
                 
                 # 如果达到批量大小或超过最长等待时间，执行写入
@@ -641,7 +641,7 @@ class HandCollector:
                                (time.time() - last_write_time) >= max_wait_time)
                 
                 if should_write and batch_buffer:
-                    print(f"[{self.hand_name}] DEBUG: 准备调用_write_batch，batch数量={len(batch_buffer)}")
+                    # print(f"[{self.hand_name}] DEBUG: 准备调用_write_batch，batch数量={len(batch_buffer)}")
                     self._write_batch(batch_buffer, encode_params)
                     batch_buffer = []
                     last_write_time = time.time()
