@@ -30,7 +30,7 @@ except ImportError:
 
 def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str,
                           jpeg_quality: int = 85) -> str:
-    """保存单手数据到HDF5（流式写入优化内存）"""
+    """保存单手数据到HDF5（真正的流式写入，优化内存）"""
     if not data:
         print("❌ 无数据")
         return None
@@ -53,11 +53,9 @@ def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str
     print(f"  帧数: {n_frames}")
     
     start_time = time.time()
-    
-    # 流式写入HDF5（避免一次性加载所有数据到内存）
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
     
-    print("  写入HDF5（流式）...")
+    print("  流式写入HDF5（逐批处理以节省内存）...")
     write_start = time.time()
     
     with h5py.File(filepath, 'w', libver='latest') as f:
@@ -69,21 +67,34 @@ def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str
         f.attrs['jpeg_quality'] = jpeg_quality
         f.attrs['created_at'] = datetime.now().isoformat()
         
-        # 准备所有 JPEG 数据和元数据（避免 h5py 索引赋值问题）
-        stereo_jpegs = []
-        mono_jpegs = []
-        angles = []
-        timestamps = []
-        stereo_timestamps = []
-        mono_timestamps = []
-        encoder_timestamps = []
+        # 创建可变长度数据集（初始大小为0）
+        dt = h5py.special_dtype(vlen=np.uint8)
+        stereo_dset = f.create_dataset('stereo_jpeg', (0,), dtype=dt, maxshape=(None,))
+        mono_dset = f.create_dataset('mono_jpeg', (0,), dtype=dt, maxshape=(None,))
         
-        print("  压缩图像...")
-        # 分批处理和压缩（每批100帧）
-        batch_size = 100
+        # 创建固定长度数据集
+        angles_dset = f.create_dataset('angles', (0,), dtype=np.float32, maxshape=(None,))
+        timestamps_dset = f.create_dataset('timestamps', (0,), dtype=np.float64, maxshape=(None,))
+        stereo_ts_dset = f.create_dataset('stereo_timestamps', (0,), dtype=np.float64, maxshape=(None,))
+        mono_ts_dset = f.create_dataset('mono_timestamps', (0,), dtype=np.float64, maxshape=(None,))
+        encoder_ts_dset = f.create_dataset('encoder_timestamps', (0,), dtype=np.float64, maxshape=(None,))
+        
+        # 逐批处理并写入（每批10帧以最小化内存占用）
+        batch_size = 10
+        written_count = 0
+        
         for i in range(0, n_frames, batch_size):
             batch_end = min(i + batch_size, n_frames)
             batch_data = data[i:batch_end]
+            
+            # 临时存储当前批次数据
+            batch_stereo_jpegs = []
+            batch_mono_jpegs = []
+            batch_angles = []
+            batch_timestamps = []
+            batch_stereo_ts = []
+            batch_mono_ts = []
+            batch_encoder_ts = []
             
             for frame in batch_data:
                 # 压缩图像
@@ -91,35 +102,51 @@ def save_single_hand_data(data: List[HandFrame], hand_name: str, output_dir: str
                 success_m, m_jpeg = cv2.imencode('.jpg', frame.mono, encode_params)
                 
                 if not (success_s and success_m):
-                    print(f"\n⚠️ 警告: 图像压缩失败，跳过")
+                    print(f"\n⚠️ 警告: 图像压缩失败，跳过帧")
                     continue
                 
-                # 保存到列表（转为 numpy uint8 数组）
-                stereo_jpegs.append(np.asarray(s_jpeg, dtype=np.uint8))
-                mono_jpegs.append(np.asarray(m_jpeg, dtype=np.uint8))
+                # 添加到当前批次
+                batch_stereo_jpegs.append(np.asarray(s_jpeg, dtype=np.uint8))
+                batch_mono_jpegs.append(np.asarray(m_jpeg, dtype=np.uint8))
+                batch_angles.append(frame.angle)
+                batch_timestamps.append(frame.timestamp)
+                batch_stereo_ts.append(frame.stereo_ts)
+                batch_mono_ts.append(frame.mono_ts)
+                batch_encoder_ts.append(frame.encoder_ts)
+            
+            # 写入当前批次到HDF5
+            if batch_stereo_jpegs:
+                batch_len = len(batch_stereo_jpegs)
+                new_size = written_count + batch_len
                 
-                angles.append(frame.angle)
-                timestamps.append(frame.timestamp)
-                stereo_timestamps.append(frame.stereo_ts)
-                mono_timestamps.append(frame.mono_ts)
-                encoder_timestamps.append(frame.encoder_ts)
+                # 扩展数据集
+                stereo_dset.resize((new_size,))
+                mono_dset.resize((new_size,))
+                angles_dset.resize((new_size,))
+                timestamps_dset.resize((new_size,))
+                stereo_ts_dset.resize((new_size,))
+                mono_ts_dset.resize((new_size,))
+                encoder_ts_dset.resize((new_size,))
+                
+                # 写入数据
+                stereo_dset[written_count:new_size] = batch_stereo_jpegs
+                mono_dset[written_count:new_size] = batch_mono_jpegs
+                angles_dset[written_count:new_size] = batch_angles
+                timestamps_dset[written_count:new_size] = batch_timestamps
+                stereo_ts_dset[written_count:new_size] = batch_stereo_ts
+                mono_ts_dset[written_count:new_size] = batch_mono_ts
+                encoder_ts_dset[written_count:new_size] = batch_encoder_ts
+                
+                written_count = new_size
+                
+                # 清空批次数据释放内存
+                del batch_stereo_jpegs, batch_mono_jpegs
+                del batch_angles, batch_timestamps
+                del batch_stereo_ts, batch_mono_ts, batch_encoder_ts
             
             # 显示进度
             progress = (batch_end / n_frames) * 100
-            print(f"  压缩进度: {batch_end}/{n_frames} ({progress:.1f}%)", end='\r')
-        
-        print("\n  创建数据集...")
-        # 创建可变长度数据集并一次性写入所有数据
-        dt = h5py.special_dtype(vlen=np.uint8)
-        f.create_dataset('stereo_jpeg', data=stereo_jpegs, dtype=dt)
-        f.create_dataset('mono_jpeg', data=mono_jpegs, dtype=dt)
-        
-        # 写入角度和时间戳数据
-        f.create_dataset('angles', data=angles, dtype=np.float32)
-        f.create_dataset('timestamps', data=timestamps, dtype=np.float64)
-        f.create_dataset('stereo_timestamps', data=stereo_timestamps, dtype=np.float64)
-        f.create_dataset('mono_timestamps', data=mono_timestamps, dtype=np.float64)
-        f.create_dataset('encoder_timestamps', data=encoder_timestamps, dtype=np.float64)
+            print(f"  写入进度: {written_count}/{n_frames} ({progress:.1f}%)", end='\r')
     
     write_time = time.time() - write_start
     total_time = time.time() - start_time

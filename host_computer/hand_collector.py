@@ -471,9 +471,9 @@ class HandCollector:
                 if s_data:
                     self._record_stats['frames'] += len(s_data)
                 
-                # 每5秒打印一次进度
+                # 每1秒打印一次进度
                 now = time.time()
-                if now - self._record_stats['last_print'] >= 5.0:
+                if now - self._record_stats['last_print'] >= 1.0:
                     elapsed = now - self._record_start_ts
                     fps = self._record_stats['frames'] / elapsed if elapsed > 0 else 0
                     
