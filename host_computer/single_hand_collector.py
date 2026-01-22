@@ -242,6 +242,45 @@ if __name__ == "__main__":
                 # 实时写入模式：返回文件路径
                 if result:
                     print(f"\n[{hand_name}] ✅ 数据已保存到: {result}")
+                    # 如果启用了校正但录制时跳过了，执行离线校正
+                    if collector._skip_rectify_on_write:
+                        print(f"[{hand_name}] 正在进行离线立体校正（流式处理）...")
+                        temp_path = result.replace('.h5', '_temp.h5')
+                        try:
+                            with h5py.File(result, 'r') as f_in:
+                                n = f_in['stereo_jpeg'].shape[0]
+                                # 创建临时文件进行流式校正
+                                with h5py.File(temp_path, 'w') as f_out:
+                                    # 复制元数据
+                                    for k, v in f_in.attrs.items():
+                                        f_out.attrs[k] = v
+                                    f_out.attrs['stereo_rectified'] = True
+                                    # 复制非图像数据集
+                                    for key in ['mono_jpeg', 'angles', 'timestamps', 'stereo_timestamps', 
+                                               'mono_timestamps', 'encoder_timestamps']:
+                                        f_out.create_dataset(key, data=f_in[key][:])
+                                    # 流式校正立体图像（逐批处理）
+                                    dt = h5py.special_dtype(vlen=np.uint8)
+                                    stereo_dset = f_out.create_dataset('stereo_jpeg', (n,), dtype=dt)
+                                    batch_size = 20
+                                    for i in range(0, n, batch_size):
+                                        batch_end = min(i + batch_size, n)
+                                        for j in range(i, batch_end):
+                                            img = cv2.imdecode(np.frombuffer(f_in['stereo_jpeg'][j], np.uint8), cv2.IMREAD_COLOR)
+                                            rectified = collector._rectify_stereo(img)
+                                            stereo_dset[j] = np.asarray(cv2.imencode('.jpg', rectified, 
+                                                                        [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])[1], np.uint8)
+                                        print(f"  校正进度: {batch_end}/{n} ({batch_end*100//n}%)", end='\r')
+                            print(f"\n  替换原始文件...")
+                            # 删除原始文件，重命名临时文件
+                            os.remove(result)
+                            os.rename(temp_path, result)
+                            print(f"[{hand_name}] ✅ 校正完成: {result}")
+                        except Exception as e:
+                            print(f"\n[{hand_name}] ⚠️ 离线校正失败: {e}")
+                            # 清理临时文件
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
             else:
                 # 内存模式：返回数据列表，需要保存
                 if result:
