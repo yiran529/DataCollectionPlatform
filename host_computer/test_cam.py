@@ -27,7 +27,7 @@ def scan_cameras():
         else:
             pass # 节点不存在
 
-scan_cameras(
+scan_cameras()
 
 def test_video0():
     """专门测试/dev/video0摄像头"""
