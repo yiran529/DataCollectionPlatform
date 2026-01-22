@@ -620,7 +620,7 @@ class HandCollector:
         print(f"[{self.hand_name}] 写入线程已启动")
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
         batch_buffer = []
-        batch_size = 20  # 增大批次到20帧，减少IO次数
+        batch_size = 10  # 增大批次到20帧，减少IO次数
         last_write_time = time.time()
         max_wait_time = 0.3  # 减少等待时间到0.3秒，提高响应速度
         
