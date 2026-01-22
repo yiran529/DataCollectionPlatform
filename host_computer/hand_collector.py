@@ -603,7 +603,7 @@ class HandCollector:
             self._h5_file.create_dataset('encoder_timestamps', (0,), dtype=np.float64, maxshape=(None,))
             
             # 创建写入队列（线程将在start_recording中启动）
-            self._write_queue = queue.Queue(maxsize=100)
+            self._write_queue = queue.Queue(maxsize=250)
             
             print(f"[{self.hand_name}] ✓ 实时写入已初始化: {self._h5_filepath}")
             return True
@@ -620,7 +620,7 @@ class HandCollector:
         print(f"[{self.hand_name}] 写入线程已启动")
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self._jpeg_quality]
         batch_buffer = []
-        batch_size = 10  # 增大批次到20帧，减少IO次数
+        batch_size = 15  # 增大批次到15帧，减少IO次数
         last_write_time = time.time()
         max_wait_time = 0.3  # 减少等待时间到0.3秒，提高响应速度
         
