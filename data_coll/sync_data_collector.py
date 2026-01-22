@@ -157,126 +157,22 @@ class CameraReader:
         self.last_ts = 0
         
     def open(self) -> bool:
-        # 注意：GStreamer 在某些 Jetson 配置下可能不稳定，默认禁用
-        # 如需启用 GStreamer，设置环境变量: export USE_GSTREAMER=1
-        use_gstreamer = os.environ.get('USE_GSTREAMER', '0') == '1' and self._is_jetson_platform()
-        
-        if use_gstreamer:
-            # Jetson 平台：使用 GStreamer 管道实现硬件加速
-            gst_pipeline = (
-                f"v4l2src device=/dev/video{self.device_id} ! "
-                f"image/jpeg,width={self.width},height={self.height},framerate={self.fps}/1 ! "
-                f"jpegdec ! videoconvert ! appsink"
-            )
-            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-            print(f"[{self.name}] 使用 GStreamer 硬件加速（Jetson 优化）")
-        else:
-            # 树莓派或其他平台：使用标准 V4L2（强制使用 V4L2 后端，避免 GStreamer）
-            # 首先用 v4l2-ctl 配置相机参数
-            import subprocess
-            try:
-                # 设置 MJPG 格式以获得更高帧率
-                subprocess.run(
-                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', 
-                     '--set-fmt-video', f'width={self.width},height={self.height},pixelformat=MJPG'],
-                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                # 设置帧率
-                subprocess.run(
-                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', '-p', str(int(self.fps))],
-                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-            except Exception as e:
-                print(f"[{self.name}] ⚠️ v4l2-ctl 初始配置失败: {e}")
-            
-            print(f"[{self.name}] 打开设备 /dev/video{self.device_id}...", end='', flush=True)
-            self.cap = cv2.VideoCapture(self.device_id, cv2.CAP_V4L2)
-            print(" ✓")
-            print(f"[{self.name}] 使用标准 V4L2 模式（强制 V4L2 后端）")
-            
-            # OpenCV 打开时会重置驱动配置，所以需要再配置一次
-            try:
-                subprocess.run(
-                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', 
-                     '--set-fmt-video', f'width={self.width},height={self.height},pixelformat=MJPG'],
-                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                subprocess.run(
-                    ['v4l2-ctl', '-d', f'/dev/video{self.device_id}', '-p', str(int(self.fps))],
-                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                print(f"[{self.name}] ✓ v4l2-ctl 重新配置: {self.width}x{self.height} @ {self.fps}fps MJPG")
-            except Exception as e:
-                print(f"[{self.name}] ⚠️ v4l2-ctl 重新配置失败: {e}")
-        
-        # 等待设备完全初始化
-        time.sleep(0.2)
+        # 使用默认后端（与 aligned_capture.py 相同）
+        self.cap = cv2.VideoCapture(self.device_id)
         
         if not self.cap.isOpened():
-            print(f"[{self.name}] ❌ 无法打开设备 /dev/video{self.device_id}")
-            print(f"[{self.name}] 可能原因：设备被占用、不存在或权限不足")
+            print(f"[{self.name}] 无法打开设备 {self.device_id}")
             return False
         
-        print(f"[{self.name}] ✓ 设备已打开，设置参数...")
+        # 设置 MJPG 格式
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
         
-        # 非 GStreamer 模式才需要设置参数
-        if not use_gstreamer:
-            try:
-                # 通过 OpenCV 显式设置参数（确保与 v4l2-ctl 同步）
-                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                self.cap.set(cv2.CAP_PROP_FPS, self.fps)
-                
-                time.sleep(0.1)
-                
-                # 读取实际参数验证
-                actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-                
-                # 如果参数不匹配，显示警告
-                if actual_w != self.width or actual_h != self.height or abs(actual_fps - self.fps) > 1:
-                    print(f"[{self.name}] ⚠️ 参数不匹配:")
-                    print(f"[{self.name}]   请求: {self.width}x{self.height} @ {self.fps}fps")
-                    print(f"[{self.name}]   实际: {actual_w}x{actual_h} @ {actual_fps:.1f}fps")
-                else:
-                    print(f"[{self.name}] ✓ 相机参数: {actual_w}x{actual_h} @ {actual_fps:.1f}fps")
-                
-            except Exception as e:
-                print(f"[{self.name}] ⚠️ 参数设置异常: {e}")
-                return False
-        
-        # 等待参数生效
-        time.sleep(0.2)
-        
-        # 预热（快速检查，不要求完整预热）
-        print(f"[{self.name}] 预热中...", end='', flush=True)
-        try:
-            read_count = 0
-            timeout = time.time() + 3.0  # 快速超时（3秒）
-            
-            for i in range(20):
-                if time.time() > timeout:
-                    break
-                
-                ret, frame = self.cap.read()
-                if ret:
-                    read_count += 1
-                    if read_count >= 1:  # 只要读到 1 帧就可以了
-                        break
-            
-            if read_count > 0:
-                print(f" ✓ ({read_count} 帧)")
-            else:
-                print(f" ⚠️ (0 帧，但继续)")
-                
-        except Exception as e:
-            print(f" ✗ 异常: {e}")
-            # 不返回 False，继续尝试
-        
-        # 小延迟，让驱动程序稳定
-        time.sleep(0.2)
+        # 预热
+        for _ in range(10):
+            self.cap.read()
         
         # 检查实际参数
         actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -285,20 +181,6 @@ class CameraReader:
         
         print(f"[{self.name}] {self.device_id}: {actual_w}x{actual_h} @ {actual_fps:.0f}fps")
         return True
-    
-    def _is_jetson_platform(self) -> bool:
-        """检测是否为 Jetson 平台"""
-        if os.path.exists('/etc/nv_tegra_release'):
-            return True
-        if os.path.exists('/proc/device-tree/model'):
-            try:
-                with open('/proc/device-tree/model', 'r') as f:
-                    model = f.read().lower()
-                    if 'jetson' in model or 'nvidia' in model:
-                        return True
-            except:
-                pass
-        return False
     
     def start(self):
         self.running = True
