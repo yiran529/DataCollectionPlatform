@@ -87,6 +87,8 @@ class HandCollector:
         self._enable_realtime_write = enable_realtime_write
         self._output_dir = output_dir
         self._jpeg_quality = jpeg_quality
+        # 实时写入时跳过校正以提升性能（录制后可离线校正）
+        self._skip_rectify_on_write = enable_realtime_write
         self._h5_file = None
         self._h5_filepath = None
         self._write_queue = None
@@ -602,6 +604,9 @@ class HandCollector:
             self._h5_file.attrs['jpeg_quality'] = self._jpeg_quality
             self._h5_file.attrs['created_at'] = datetime.now().isoformat()
             self._h5_file.attrs['realtime_write'] = True
+            self._h5_file.attrs['stereo_rectified'] = not self._skip_rectify_on_write  # 是否已校正
+            if self._skip_rectify_on_write:
+                print(f"[{self.hand_name}]   ⚡ 性能模式：跳过立体校正（可录制后离线处理）")
             
             # 创建可变长度数据集
             dt = h5py.special_dtype(vlen=np.uint8)
@@ -773,11 +778,14 @@ class HandCollector:
             batch_encoder_ts = []
             
             for s, mono, enc in aligned_frames:
-                # 应用立体校正
-                stereo_rectified = self._rectify_stereo(s.data)
+                # 应用立体校正（实时写入模式下跳过以提升性能）
+                if self._skip_rectify_on_write:
+                    stereo_img = s.data  # 直接使用原始图像
+                else:
+                    stereo_img = self._rectify_stereo(s.data)
                 
                 # 压缩图像
-                success_s, s_jpeg = cv2.imencode('.jpg', stereo_rectified, encode_params)
+                success_s, s_jpeg = cv2.imencode('.jpg', stereo_img, encode_params)
                 success_m, m_jpeg = cv2.imencode('.jpg', mono.data, encode_params)
                 
                 if not (success_s and success_m):
@@ -793,7 +801,7 @@ class HandCollector:
                 
                 # 设置图像尺寸元数据（第一次）
                 if 'stereo_shape' not in self._h5_file.attrs:
-                    self._h5_file.attrs['stereo_shape'] = stereo_rectified.shape
+                    self._h5_file.attrs['stereo_shape'] = stereo_img.shape
                     self._h5_file.attrs['mono_shape'] = mono.data.shape
             
             # 写入HDF5
@@ -894,7 +902,7 @@ class HandCollector:
             if self._write_thread:
                 self._write_thread.join(timeout=15)
                 # 等待更长时间，并检查队列是否清空
-                for i in range(120):  # 最多120秒
+                for i in range(200):  # 最多200秒
                     self._write_thread.join(timeout=1.0)
                     if not self._write_thread.is_alive():
                         break
