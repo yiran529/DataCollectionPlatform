@@ -870,6 +870,17 @@ class HandCollector:
             print(f"[{self.hand_name}] 等待写入线程完成...")
             if self._write_thread:
                 self._write_thread.join(timeout=15)
+                # 等待更长时间，并检查队列是否清空
+                for i in range(30):  # 最多30秒
+                    self._write_thread.join(timeout=1.0)
+                    if not self._write_thread.is_alive():
+                        break
+                    queue_size = self._write_queue.qsize() if self._write_queue else 0
+                    if i % 5 == 0:  # 每5秒打印一次进度
+                        print(f"[{self.hand_name}] 等待中... (队列剩余: {queue_size})")
+                
+                if self._write_thread.is_alive():
+                    print(f"[{self.hand_name}] ⚠️ 写入线程超时，队列剩余: {self._write_queue.qsize()}")
             
             # 更新帧数元数据
             if self._h5_file:
