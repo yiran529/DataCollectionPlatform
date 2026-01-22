@@ -93,6 +93,9 @@ class HandCollector:
         self._write_thread = None
         self._write_lock = threading.Lock()
         self._total_written = 0
+        self._total_queued_frames = 0  # 队列中的总帧数（估算）
+        self._total_aligned = 0  # 成功对齐的帧数
+        self._total_dropped = 0  # 对齐失败丢弃的帧数
     
     @property
     def is_ready(self) -> bool:
@@ -504,6 +507,10 @@ class HandCollector:
                             'mono': m_data,
                             'encoder': e_data
                         }, timeout=1.0)  # 1秒超时避免永久阻塞
+                        # 更新队列中的帧数（估算）
+                        if s_data:
+                            with self._record_lock:
+                                self._total_queued_frames += len(s_data)
                     except queue.Full:
                         print(f"\n[{self.hand_name}] ⚠️ 写入队列已满，数据可能丢失")
                 
@@ -540,19 +547,25 @@ class HandCollector:
                             print(f"\n[{self.hand_name}] ⚠️ 内存使用较高: {mem_gb:.1f}GB")
                         
                         if self._enable_realtime_write:
-                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 已写入:{self._total_written}, 队列:{queue_size}, {mem_gb:.1f}GB)", end='\r')
+                            queued_frames = self._total_queued_frames - self._total_aligned
+                            dropped = self._total_dropped
+                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 写:{self._total_written}, 队列批:{queue_size}(~{queued_frames}帧), 丢:{dropped}, {mem_gb:.1f}GB)", end='\r')
                         else:
                             encoder_count = len(self._recorded_encoder)
                             print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, {encoder_count} encoder, {mem_gb:.1f}GB)", end='\r')
                     except:
                         if self._enable_realtime_write:
-                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 已写入:{self._total_written}, 队列:{queue_size})", end='\r')
+                            queued_frames = self._total_queued_frames - self._total_aligned
+                            dropped = self._total_dropped
+                            print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 写:{self._total_written}, 队列批:{queue_size}(~{queued_frames}帧), 丢:{dropped})", end='\r')
                         else:
                             encoder_count = len(self._recorded_encoder)
                             print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, {encoder_count} encoder)", end='\r')
                 else:
                     if self._enable_realtime_write:
-                        print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 已写入:{self._total_written}, 队列:{queue_size})", end='\r')
+                        queued_frames = self._total_queued_frames - self._total_aligned
+                        dropped = self._total_dropped
+                        print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, 写:{self._total_written}, 队列批:{queue_size}(~{queued_frames}帧), 丢:{dropped})", end='\r')
                     else:
                         encoder_count = len(self._recorded_encoder)
                         print(f"[{self.hand_name}] 录制: {self._record_stats['frames']} 帧 ({elapsed:.1f}s, {fps:.1f}fps, {encoder_count} encoder)", end='\r')
@@ -741,6 +754,10 @@ class HandCollector:
                     aligned_frames.append((s, mono, enc))
             
             if not aligned_frames:
+                # 所有帧都对齐失败
+                with self._write_lock:
+                    self._total_dropped += len(all_stereo)
+                    self._total_aligned += len(all_stereo)  # 标记为已处理
                 print(f"[{self.hand_name}] ⚠️ 对齐后没有有效帧（可能时间戳不匹配）")
                 return
             
@@ -808,6 +825,12 @@ class HandCollector:
                     self._h5_file.flush()
                     
                     self._total_written = new_size
+                    # 更新对齐统计：成功对齐的 + 失败的 = 总处理的
+                    frames_processed = len(all_stereo)
+                    frames_aligned = len(batch_stereo_jpegs)
+                    frames_dropped = frames_processed - frames_aligned
+                    self._total_aligned += frames_processed
+                    self._total_dropped += frames_dropped
                     # print(f"[{self.hand_name}] DEBUG: 成功写入，总帧数={self._total_written}")
                     
         except Exception as e:
@@ -871,7 +894,7 @@ class HandCollector:
             if self._write_thread:
                 self._write_thread.join(timeout=15)
                 # 等待更长时间，并检查队列是否清空
-                for i in range(30):  # 最多30秒
+                for i in range(120):  # 最多120秒
                     self._write_thread.join(timeout=1.0)
                     if not self._write_thread.is_alive():
                         break
