@@ -135,12 +135,12 @@ left_hand:
       calibrated: true
 right_hand:
   mono:
-    device: 0
+    device: 1
     width: 640
     height: 480
     fps: 30
   stereo:
-    device: 3
+    device: 4
     width: 1280
     height: 480
     fps: 30
