@@ -19,7 +19,7 @@ import yaml
 import json
 import glob
 from dataclasses import dataclass
-from typing import Optional, List, Dict
+from typing import Optional, List, Tuple, Union
 from collections import deque
 
 # 添加父目录到路径，以便导入sync_data_collector
@@ -57,9 +57,15 @@ class DualHandFrame:
 class DualHandCollector:
     """双手同步数据收集器"""
     
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, *, enable_realtime_write: bool = True,
+                 output_dir: Optional[str] = None, jpeg_quality: Optional[int] = None):
         self.config_path = config_path
         self.config = self._load_config()
+        
+        save_cfg = self.config.get('save', {})
+        self.enable_realtime_write = enable_realtime_write
+        self.output_dir = output_dir if output_dir is not None else save_cfg.get('output_dir', './data')
+        self.jpeg_quality = jpeg_quality if jpeg_quality is not None else save_cfg.get('jpeg_quality', 85)
         
         self.left: Optional[HandCollector] = None
         self.right: Optional[HandCollector] = None
@@ -93,8 +99,20 @@ class DualHandCollector:
         left_cfg = self.config.get('left_hand', {})
         right_cfg = self.config.get('right_hand', {})
         
-        self.left = HandCollector(left_cfg, "LEFT")
-        self.right = HandCollector(right_cfg, "RIGHT")
+        self.left = HandCollector(
+            left_cfg,
+            "LEFT",
+            enable_realtime_write=self.enable_realtime_write,
+            output_dir=self.output_dir,
+            jpeg_quality=self.jpeg_quality
+        )
+        self.right = HandCollector(
+            right_cfg,
+            "RIGHT",
+            enable_realtime_write=self.enable_realtime_write,
+            output_dir=self.output_dir,
+            jpeg_quality=self.jpeg_quality
+        )
         
         # 启动
         self.left.start()
@@ -136,18 +154,31 @@ class DualHandCollector:
         print("🔴 开始录制双手数据...")
         return True
     
-    def stop_recording(self) -> List[DualHandFrame]:
-        """停止录制并返回对齐的双手数据"""
+    def stop_recording(self) -> Union[Tuple[Optional[str], Optional[str]], List[DualHandFrame]]:
+        """停止录制并返回对齐的双手数据或文件路径"""
         if not self._recording:
-            return []
+            return (None, None) if self.enable_realtime_write else []
         
         self._recording = False
         
-        # 获取左右手数据
-        left_data = self.left.stop_recording()
-        right_data = self.right.stop_recording()
+        # 获取左右手结果
+        left_result = self.left.stop_recording()
+        right_result = self.right.stop_recording()
         
-        # 对齐双手数据
+        if self.enable_realtime_write:
+            left_path = left_result if isinstance(left_result, str) else None
+            right_path = right_result if isinstance(right_result, str) else None
+            if left_path and right_path:
+                print(f"\n双手实时写入完成")
+                print(f"  左手文件: {left_path}")
+                print(f"  右手文件: {right_path}")
+            else:
+                print("\n⚠️ 实时写入结果缺失，请检查左右手文件是否生成成功")
+            return (left_path, right_path)
+        
+        left_data = left_result if isinstance(left_result, list) else []
+        right_data = right_result if isinstance(right_result, list) else []
+        
         aligned = self._align_hands(left_data, right_data)
         
         print(f"\n双手对齐完成: {len(aligned)} 帧")
@@ -308,6 +339,153 @@ def save_dual_hand_data(data: List[DualHandFrame], output_dir: str,
     print(f"✅ 保存完成: {filepath}")
     
     return filepath
+
+
+def merge_dual_hand_files(left_path: Optional[str], right_path: Optional[str],
+                          output_dir: Optional[str] = None,
+                          max_time_diff_ms: float = 50.0) -> Optional[str]:
+    """离线对齐左右手实时写入文件并合并为一个双手数据文件"""
+    if not HAS_H5PY:
+        print("❌ h5py 未安装，无法合并双手数据")
+        return None
+    if not left_path or not right_path:
+        print("❌ 缺少左右手文件路径，无法合并")
+        return None
+    if not os.path.exists(left_path):
+        print(f"❌ 左手文件不存在: {left_path}")
+        return None
+    if not os.path.exists(right_path):
+        print(f"❌ 右手文件不存在: {right_path}")
+        return None
+
+    output_dir = output_dir or os.path.dirname(left_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        from datetime import datetime
+        max_diff_s = max_time_diff_ms / 1000.0
+        with h5py.File(left_path, 'r') as left_f, h5py.File(right_path, 'r') as right_f:
+            left_ts = np.asarray(left_f['timestamps'], dtype=np.float64)
+            right_ts = np.asarray(right_f['timestamps'], dtype=np.float64)
+            n_left = left_ts.shape[0]
+            n_right = right_ts.shape[0]
+            if n_left == 0 or n_right == 0:
+                print("❌ 左右手文件中存在空数据集，无法合并")
+                return None
+
+            pairs: List[Tuple[int, int]] = []
+            r_idx = 0
+            while r_idx < n_right and right_ts[r_idx] < left_ts[0] - max_diff_s:
+                r_idx += 1
+            for l_idx, l_ts in enumerate(left_ts):
+                while r_idx < n_right and right_ts[r_idx] < l_ts - max_diff_s:
+                    r_idx += 1
+                if r_idx >= n_right:
+                    break
+                best_idx = r_idx
+                while (best_idx + 1 < n_right and
+                       abs(right_ts[best_idx + 1] - l_ts) <= abs(right_ts[best_idx] - l_ts)):
+                    best_idx += 1
+                if abs(right_ts[best_idx] - l_ts) <= max_diff_s:
+                    pairs.append((l_idx, best_idx))
+                    if best_idx + 1 < n_right:
+                        r_idx = best_idx + 1
+                    else:
+                        r_idx = n_right
+
+            if not pairs:
+                print("❌ 未找到可对齐的左右手帧，请检查数据时间戳")
+                return None
+
+            n_aligned = len(pairs)
+            prefix = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{prefix}_dual_hand_data.h5"
+            merged_path = os.path.join(output_dir, filename)
+
+            with h5py.File(merged_path, 'w', libver='latest') as out_f:
+                out_f.attrs['n_frames'] = n_aligned
+                out_f.attrs['jpeg_quality'] = left_f.attrs.get('jpeg_quality', 85)
+                out_f.attrs['created_at'] = datetime.now().isoformat()
+                out_f.attrs['left_source'] = os.path.basename(left_path)
+                out_f.attrs['right_source'] = os.path.basename(right_path)
+                out_f.attrs['merge_mode'] = 'offline_align'
+                out_f.attrs['max_time_diff_ms'] = max_time_diff_ms
+                if 'hand' in left_f.attrs:
+                    out_f.attrs['left_hand'] = left_f.attrs['hand']
+                if 'hand' in right_f.attrs:
+                    out_f.attrs['right_hand'] = right_f.attrs['hand']
+                if 'stereo_shape' in left_f.attrs:
+                    out_f.attrs['left_stereo_shape'] = left_f.attrs['stereo_shape']
+                if 'mono_shape' in left_f.attrs:
+                    out_f.attrs['left_mono_shape'] = left_f.attrs['mono_shape']
+                if 'stereo_shape' in right_f.attrs:
+                    out_f.attrs['right_stereo_shape'] = right_f.attrs['stereo_shape']
+                if 'mono_shape' in right_f.attrs:
+                    out_f.attrs['right_mono_shape'] = right_f.attrs['mono_shape']
+
+                dt = h5py.special_dtype(vlen=np.uint8)
+                left_stereo_ds = out_f.create_dataset('left_stereo_jpeg', (n_aligned,), dtype=dt)
+                left_mono_ds = out_f.create_dataset('left_mono_jpeg', (n_aligned,), dtype=dt)
+                right_stereo_ds = out_f.create_dataset('right_stereo_jpeg', (n_aligned,), dtype=dt)
+                right_mono_ds = out_f.create_dataset('right_mono_jpeg', (n_aligned,), dtype=dt)
+
+                left_angles = np.zeros(n_aligned, dtype=np.float32)
+                left_timestamps = np.zeros(n_aligned, dtype=np.float64)
+                left_stereo_ts = np.zeros(n_aligned, dtype=np.float64)
+                left_mono_ts = np.zeros(n_aligned, dtype=np.float64)
+                left_encoder_ts = np.zeros(n_aligned, dtype=np.float64)
+
+                right_angles = np.zeros(n_aligned, dtype=np.float32)
+                right_timestamps = np.zeros(n_aligned, dtype=np.float64)
+                right_stereo_ts = np.zeros(n_aligned, dtype=np.float64)
+                right_mono_ts = np.zeros(n_aligned, dtype=np.float64)
+                right_encoder_ts = np.zeros(n_aligned, dtype=np.float64)
+
+                sync_timestamps = np.zeros(n_aligned, dtype=np.float64)
+
+                for idx, (l_idx, r_idx_pair) in enumerate(pairs):
+                    left_stereo_ds[idx] = left_f['stereo_jpeg'][l_idx]
+                    left_mono_ds[idx] = left_f['mono_jpeg'][l_idx]
+                    right_stereo_ds[idx] = right_f['stereo_jpeg'][r_idx_pair]
+                    right_mono_ds[idx] = right_f['mono_jpeg'][r_idx_pair]
+
+                    left_angles[idx] = float(left_f['angles'][l_idx])
+                    left_timestamps[idx] = float(left_f['timestamps'][l_idx])
+                    left_stereo_ts[idx] = float(left_f['stereo_timestamps'][l_idx])
+                    left_mono_ts[idx] = float(left_f['mono_timestamps'][l_idx])
+                    left_encoder_ts[idx] = float(left_f['encoder_timestamps'][l_idx])
+
+                    right_angles[idx] = float(right_f['angles'][r_idx_pair])
+                    right_timestamps[idx] = float(right_f['timestamps'][r_idx_pair])
+                    right_stereo_ts[idx] = float(right_f['stereo_timestamps'][r_idx_pair])
+                    right_mono_ts[idx] = float(right_f['mono_timestamps'][r_idx_pair])
+                    right_encoder_ts[idx] = float(right_f['encoder_timestamps'][r_idx_pair])
+
+                    sync_timestamps[idx] = (left_timestamps[idx] + right_timestamps[idx]) / 2.0
+
+                out_f.create_dataset('left_angles', data=left_angles, dtype=np.float32)
+                out_f.create_dataset('left_timestamps', data=left_timestamps, dtype=np.float64)
+                out_f.create_dataset('left_stereo_timestamps', data=left_stereo_ts, dtype=np.float64)
+                out_f.create_dataset('left_mono_timestamps', data=left_mono_ts, dtype=np.float64)
+                out_f.create_dataset('left_encoder_timestamps', data=left_encoder_ts, dtype=np.float64)
+
+                out_f.create_dataset('right_angles', data=right_angles, dtype=np.float32)
+                out_f.create_dataset('right_timestamps', data=right_timestamps, dtype=np.float64)
+                out_f.create_dataset('right_stereo_timestamps', data=right_stereo_ts, dtype=np.float64)
+                out_f.create_dataset('right_mono_timestamps', data=right_mono_ts, dtype=np.float64)
+                out_f.create_dataset('right_encoder_timestamps', data=right_encoder_ts, dtype=np.float64)
+
+                out_f.create_dataset('sync_timestamps', data=sync_timestamps, dtype=np.float64)
+
+        os.remove(left_path)
+        os.remove(right_path)
+
+        print(f"✅ 双手数据合并完成: {merged_path}")
+        print(f"  对齐帧数: {n_aligned}")
+        return merged_path
+    except Exception as exc:
+        print(f"❌ 合并双手数据失败: {exc}")
+        return None
 
 
 def visualize_dual_hand(collector: DualHandCollector):
@@ -486,6 +664,11 @@ if __name__ == "__main__":
                        help="启用可视化模式")
     parser.add_argument("--record", "-r", action="store_true",
                        help="录制模式（与可视化模式互斥）")
+    parser.add_argument("--realtime-write", dest="realtime_write", action="store_true",
+                       help="启用实时写入模式（录制时直接写入磁盘，默认开启）")
+    parser.add_argument("--no-realtime-write", dest="realtime_write", action="store_false",
+                       help="禁用实时写入模式（改为内存缓存后离线保存）")
+    parser.set_defaults(realtime_write=True)
     args = parser.parse_args()
     
     config_path = args.config
@@ -503,7 +686,10 @@ if __name__ == "__main__":
     try:
         if args.mode == 'both':
             # 双手模式
-            collector = DualHandCollector(config_path)
+            collector = DualHandCollector(
+                config_path,
+                enable_realtime_write=args.realtime_write
+            )
             collector.start()
             if not collector.wait_ready():
                 print("❌ 初始化失败")
@@ -517,12 +703,18 @@ if __name__ == "__main__":
                 collector.start_recording()
                 print("录制中... 按回车键停止录制")
                 input()
-                data = collector.stop_recording()
-                if data:
-                    save_cfg = collector.config.get('save', {})
-                    output_dir = save_cfg.get('output_dir', './data')
-                    jpeg_quality = save_cfg.get('jpeg_quality', 85)
-                    save_dual_hand_data(data, output_dir, jpeg_quality)
+                result = collector.stop_recording()
+                save_cfg = collector.config.get('save', {})
+                output_dir = save_cfg.get('output_dir', './data')
+                jpeg_quality = save_cfg.get('jpeg_quality', 85)
+                if args.realtime_write:
+                    left_path, right_path = result if isinstance(result, tuple) else (None, None)
+                    merged_path = merge_dual_hand_files(left_path, right_path, collector.output_dir)
+                    if merged_path:
+                        print(f"\n✅ 双手数据已合并保存到: {merged_path}")
+                else:
+                    if result:
+                        save_dual_hand_data(result, output_dir, jpeg_quality)
             collector.stop()
         
         else:
@@ -535,7 +727,16 @@ if __name__ == "__main__":
                 print(f"❌ 配置文件中没有找到 {args.mode}_hand 配置")
                 sys.exit(1)
             
-            collector = HandCollector(hand_config, hand_name)
+            save_cfg = config.get('save', {})
+            output_dir = save_cfg.get('output_dir', './data')
+            jpeg_quality = save_cfg.get('jpeg_quality', 85)
+            collector = HandCollector(
+                hand_config,
+                hand_name,
+                enable_realtime_write=args.realtime_write,
+                output_dir=output_dir,
+                jpeg_quality=jpeg_quality
+            )
             collector.start()
             if not collector.wait_ready():
                 print("❌ 初始化失败")
@@ -556,14 +757,13 @@ if __name__ == "__main__":
                 print("录制中... 按回车键停止录制")
                 input()
                 data = collector.stop_recording()
-                if data:
-                    print(f"\n录制完成: {len(data)} 帧")
-                    # 单手数据可以保存为单独的HDF5文件
-                    save_cfg = config.get('save', {})
-                    output_dir = save_cfg.get('output_dir', './data')
-                    jpeg_quality = save_cfg.get('jpeg_quality', 85)
-                    # 这里可以添加单手保存函数，暂时只打印
-                    print(f"数据已收集，可扩展保存功能")
+                if args.realtime_write:
+                    if isinstance(data, str) and data:
+                        print(f"\n[{hand_name}] ✅ 数据已实时保存到: {data}")
+                else:
+                    if isinstance(data, list) and data:
+                        print(f"\n录制完成: {len(data)} 帧")
+                        print("数据已收集，可扩展保存功能")
             
             collector.stop()
         

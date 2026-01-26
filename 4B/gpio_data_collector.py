@@ -646,8 +646,8 @@ class GPIOController:
                                 
                         if self._button_callback:
                             self._button_callback()
-                            else:
-                                print(f"[GPIO] 按钮松开（防抖忽略）")
+                        else:
+                            print(f"[GPIO] 按钮松开（防抖忽略）")
                         
                         last_state = current_state
                 
